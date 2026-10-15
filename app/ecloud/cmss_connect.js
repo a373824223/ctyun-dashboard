@@ -1,7 +1,7 @@
 'use strict';
 
 // 移动公众 CMSSZTE 桌面使用本机 uSmartView 组件。这里复用其本地 IPC 协议，
-// 以组件的「已连接」(6) 为成功依据，再发送「断开连接」(3)。不调用电源接口。
+// 以组件的「已连接」(6) 为成功依据；短连接约 10 秒后断开，手动保持连接不自动断开。
 const fs = require('fs');
 const path = require('path');
 const net = require('net');
@@ -11,7 +11,7 @@ const { spawn } = require('child_process');
 const PUBLIC_KEY = fs.readFileSync(path.join(__dirname, 'cmss_public_key.pem'), 'utf8');
 const DEFAULT_SDK = 'D:\\CloudComputer\\drivers\\CMSS\\client\\uSmartView_VDI_Client.exe';
 const MAX_FRAME = 1024 * 1024;
-let activeConnection = false;
+let activeConnection = null;
 
 function encryptParams(params) {
   const bytes = Buffer.from(JSON.stringify(params), 'utf8');
@@ -96,21 +96,34 @@ function sdkParams(info, socketPort) {
   };
 }
 
-async function connectOnce(info, options = {}) {
+async function connectDesktop(info, options = {}) {
   if (activeConnection) throw new Error('已有一台云电脑正在执行进入操作，请稍后再试');
   if (process.platform !== 'win32') throw new Error('真实进入仅支持安装了移动云电脑客户端的 Windows 主机');
   if (!info?.machineId || !info?.accessTicket) throw new Error('缺少桌面组件连接参数');
   const sdkPath = process.env.ECLOUD_CMSS_SDK_PATH || DEFAULT_SDK;
   if (!fs.existsSync(sdkPath)) throw new Error('未找到移动云电脑桌面组件，请先安装官方客户端');
-  const holdMs = Math.max(3000, Math.min(30000, Number(options.holdMs) || 5000));
+  const persistent = options.persistent === true;
+  const holdMs = Math.max(3000, Math.min(30000, Number(options.holdMs) || 10000));
   const timeoutMs = Math.max(15000, Math.min(180000, Number(options.timeoutMs) || 90000));
   const onConnected = options.onConnected || (() => Promise.resolve());
-  activeConnection = true;
   let child, socket, server, pending = Buffer.alloc(0), connected = false, disconnectSent = false;
   let finished = false, connectedAt = 0, disconnectedAt = 0;
   let timeoutTimer, holdTimer, disconnectTimer, report = null;
   let resolveDone, rejectDone;
   const done = new Promise((resolve, reject) => { resolveDone = resolve; rejectDone = reject; });
+  let resolveReady, rejectReady;
+  const ready = new Promise((resolve, reject) => { resolveReady = resolve; rejectReady = reject; });
+  // 短连接不等待 ready，长连接的关闭可能先于用户主动断开；均需接住另一条 Promise。
+  ready.catch(() => {});
+  done.catch(() => {});
+  const handle = {
+    instanceId: info.instanceId || info.machineId,
+    connected: false,
+    connectedAt: 0,
+    closed: done,
+    disconnect: () => { if (!finished) sendDisconnect(); return done; },
+  };
+  activeConnection = handle;
 
   function cleanup() {
     clearTimeout(timeoutTimer);
@@ -124,11 +137,18 @@ async function connectOnce(info, options = {}) {
     if (finished) return;
     finished = true;
     disconnectedAt = Date.now();
+    handle.connected = false;
+    if (activeConnection === handle) activeConnection = null;
     cleanup();
+    if (!connected) rejectReady(error || new Error('桌面组件未建立连接'));
     if (error) rejectDone(error);
     else resolveDone({ connected: true, disconnected: true, connectedAt, disconnectedAt });
+    if (typeof options.onClosed === 'function') {
+      try { options.onClosed(error || null); } catch (_) { /* 日志回调不影响连接清理 */ }
+    }
   }
   function sendDisconnect() {
+    if (disconnectSent) return;
     if (socket && !socket.destroyed) {
       // 官方 CMSSZTE 客户端通过 1008 控制消息要求组件断开桌面连接。
       // ctrl_type=3 只断开会话，不会关闭云电脑电源。
@@ -145,12 +165,17 @@ async function connectOnce(info, options = {}) {
     if (notification?.type === 6 && !connected) {
       connected = true;
       connectedAt = Date.now();
+      handle.connected = true;
+      handle.connectedAt = connectedAt;
+      clearTimeout(timeoutTimer);
       report = Promise.resolve().then(() => onConnected())
         .then(() => ({ ok: true }), (error) => ({ ok: false, error: error?.message || String(error) }));
-      holdTimer = setTimeout(sendDisconnect, holdMs);
+      if (persistent) resolveReady(handle);
+      else holdTimer = setTimeout(sendDisconnect, holdMs);
     } else if (notification?.type === 7) {
       if (connected && disconnectSent) finish();
-      else finish(new Error('桌面组件在连接成功前已断开'));
+      else if (connected && persistent) finish();
+      else finish(new Error(connected ? '桌面组件在自动退出前已断开' : '桌面组件在连接成功前已断开'));
     }
   }
   try {
@@ -189,7 +214,7 @@ async function connectOnce(info, options = {}) {
       }
     });
     timeoutTimer = setTimeout(() => finish(new Error('等待桌面组件连接成功超时，已结束本次尝试')), timeoutMs);
-    const result = await done;
+    const result = await (persistent ? ready : done);
     if (report) {
       const outcome = await Promise.race([report, new Promise((resolve) => setTimeout(
         () => resolve({ ok: false, error: '会话登记响应超时' }), 10000))]);
@@ -198,11 +223,16 @@ async function connectOnce(info, options = {}) {
     }
     return result;
   } catch (e) {
-    cleanup();
+    if (!finished) finish(e);
     throw e;
-  } finally {
-    activeConnection = false;
   }
 }
 
-module.exports = { connectOnce, isConnectionBusy: () => activeConnection, encodeFrame, decodeFrame, sdkParams };
+function connectOnce(info, options = {}) {
+  return connectDesktop(info, { ...options, persistent: false });
+}
+function connectPersistent(info, options = {}) {
+  return connectDesktop(info, { ...options, persistent: true });
+}
+
+module.exports = { connectOnce, connectPersistent, isConnectionBusy: () => !!activeConnection, encodeFrame, decodeFrame, sdkParams };

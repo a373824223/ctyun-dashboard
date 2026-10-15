@@ -544,6 +544,35 @@ header:hover {
   min-width: 0;
 }
 
+.ecloud-search-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 0 0 12px;
+  padding: 10px 12px;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  background: #f8fafc;
+  color: #475569;
+  font-size: 12px;
+}
+.ecloud-search-bar label { white-space: nowrap; font-weight: 700; }
+.ecloud-search-bar input {
+  flex: 1;
+  min-width: 0;
+  max-width: 420px;
+  padding: 7px 10px;
+  border: 1px solid #cbd5e1;
+  border-radius: 6px;
+  background: #fff;
+  color: #0f172a;
+  font: inherit;
+}
+.ecloud-search-bar input:focus { outline: 2px solid #93c5fd; border-color: #3b82f6; }
+.ecloud-search-count { margin-left: auto; white-space: nowrap; color: #64748b; }
+.ecloud-search-empty { padding: 8px 12px; color: #64748b; font-size: 12px; }
+.ecloud-device-hidden { display: none !important; }
+
 .ecloud-desktops-panel {
   background: #f8fafc;
   border: 1px solid #e2e8f0;

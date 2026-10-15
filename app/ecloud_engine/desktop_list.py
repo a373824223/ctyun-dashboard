@@ -72,6 +72,7 @@ class Desktop:
     instance_id: str          # CCA-xxx，desktopUptime 必需
     machine_id: str           # UUID，machineConnect 用
     machine_name: str = ""
+    computer_name: str = ""   # 云电脑内的 Windows 客户端名称（customParams.computerName）
     origin_company_code: str = ""   # CMSSZTE / ZTE / H3C / Inspur
     resource_pool_uid: str = ""
     status: str = ""          # 来自 getDesktopStatus
@@ -103,6 +104,9 @@ def get_desktop_list(http: EcloudHttpUtil) -> list[Desktop]:
     for m in machine_list:
         if not isinstance(m, dict):
             continue
+        custom_params = m.get("customParams")
+        if not isinstance(custom_params, dict):
+            custom_params = {}
         clp = m.get("customLoginParams")
         if clp is None:
             clp = m.get("custom_login_params")
@@ -111,6 +115,7 @@ def get_desktop_list(http: EcloudHttpUtil) -> list[Desktop]:
             instance_id=m.get("instanceId", ""),
             machine_id=m.get("machineId", ""),
             machine_name=m.get("machineName", ""),
+            computer_name=str(custom_params.get("computerName") or m.get("computerName") or "").strip(),
             origin_company_code=m.get("originCompanyCode", ""),
             resource_pool_uid=m.get("resourcePoolUid", ""),
             custom_login_params=clp if clp not in ("", None) else None,

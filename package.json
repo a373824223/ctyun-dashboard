@@ -6,7 +6,7 @@
   "scripts": {
     "start": "node server.js",
     "check": "node tests/syntax_check.js",
-    "test": "node tests/syntax_check.js && node tests/regression.test.js",
+    "test": "node tests/syntax_check.js && node tests/regression.test.js && node tests/ecloud_connection.test.js",
     "test:mutation": "node tests/mutation_check.js",
     "smoke": "node analysis/smoke_check.js",
     "verify": "node tests/syntax_check.js && node tests/regression.test.js && node tests/mutation_check.js && node analysis/smoke_check.js"

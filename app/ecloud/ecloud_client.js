@@ -26,7 +26,7 @@
  */
 
 const { EcloudEngine, EngineState } = require('./ecloud_engine');
-const { connectOnce, isConnectionBusy } = require('./cmss_connect');
+const { connectOnce, connectPersistent, isConnectionBusy } = require('./cmss_connect');
 
 /** 日志来源标识（后端 inferLogPlatform 据此归入 ecloud 平台流） */
 const LOG_SOURCE = 'ECLOUD';
@@ -453,6 +453,70 @@ class EcloudClient {
       this._log(`[${label}] 进入后退出未完成：${e.message}`, 'error');
       throw e;
     }
+  }
+
+  getHeldDesktopInstanceId() {
+    const held = this._heldDesktopSession;
+    return held?.handle?.connected ? held.instanceId : '';
+  }
+
+  async enterAndStayDesktop(instanceId) {
+    await this.ensureSession();
+    const desktop = (this.account.desktops || []).find(d => String(d.instanceId) === String(instanceId));
+    if (!desktop) throw new Error('账号下找不到这台云电脑，请先同步桌面列表');
+    if (desktop.originCompanyCode !== 'CMSSZTE') throw new Error('这台云电脑不支持本机组件进入');
+    if (this.getHeldDesktopInstanceId() === String(instanceId)) {
+      return { success: true, connected: true, message: '这台云电脑已经保持连接' };
+    }
+    if (isConnectionBusy()) throw new Error('已有一台云电脑正在连接或保持连接，请先退出当前连接');
+    const label = desktop.computerName || desktop.machineName || desktop.instanceId;
+    const session = { instanceId: String(instanceId), handle: null, active: true };
+    this._heldDesktopSession = session;
+    this._log(`[${label}] 开始手动进入并保持连接`, 'info');
+    try {
+      const info = await this._withTokenRecovery(() =>
+        this.engine.desktopConnectInfo(this.sessionId, { instanceId }));
+      const handle = await connectPersistent(info, {
+        onConnected: () => this.engine.desktopReportConnect(this.sessionId, {
+          machineId: info.machineId,
+          machineName: info.machineName,
+          connectId: info.connectId,
+        }),
+        onClosed: (error) => {
+          session.active = false;
+          if (this._heldDesktopSession === session) this._heldDesktopSession = null;
+          const current = (this.account.desktops || []).find(d => String(d.instanceId) === String(instanceId));
+          if (current && session.handle?.connectedAt) {
+            current.lastRealExitAt = Date.now();
+            this.saveConfig();
+          }
+          this._recordDesktopAction(instanceId, error ? `保持连接中断：${error.message}` : '已退出保持连接', error ? 'warning' : 'idle');
+          this._log(`[${label}] ${error ? `保持连接中断：${error.message}` : '已退出保持连接'}，云电脑未关机`, error ? 'warning' : 'info');
+        },
+      });
+      session.handle = handle;
+      if (!session.active || !handle.connected) throw new Error('桌面组件刚连接后又断开');
+      const current = (this.account.desktops || []).find(d => String(d.instanceId) === String(instanceId)) || desktop;
+      current.lastRealEnterAt = handle.connectedAt;
+      this.saveConfig();
+      this._recordDesktopAction(instanceId, '已真实进入，正在保持连接', 'success');
+      if (!handle.reported) this._log(`[${label}] 平台会话登记未确认：${handle.reportError || '未知错误'}`, 'warning');
+      this._log(`[${label}] 桌面组件确认连接成功，正在保持连接`, 'success');
+      return { success: true, connected: true, message: `已进入 ${label}，保持连接中；云电脑未关机`, connectedAt: handle.connectedAt, sessionReported: handle.reported };
+    } catch (e) {
+      if (this._heldDesktopSession === session) this._heldDesktopSession = null;
+      this._log(`[${label}] 手动保持连接未完成：${e.message}`, 'error');
+      throw e;
+    }
+  }
+
+  async exitHeldDesktop(instanceId) {
+    const session = this._heldDesktopSession;
+    if (!session?.handle?.connected || session.instanceId !== String(instanceId)) {
+      return { success: true, connected: false, message: '这台云电脑当前没有由本面板保持的连接' };
+    }
+    await session.handle.disconnect();
+    return { success: true, connected: false, message: '已退出连接，云电脑未关机' };
   }
 
   async refreshDesktops() {

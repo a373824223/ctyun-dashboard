@@ -4252,7 +4252,8 @@ function rewardNeedsDesktop(prodId, prodType) {
               keepAliveView = client.describeDesktopKeepAlive(d);
             }
           } catch (e) { keepAliveView = null; }
-          return keepAliveView ? { ...d, keepAliveView } : { ...d };
+          const heldConnected = client.getHeldDesktopInstanceId?.() === String(d.instanceId);
+          return keepAliveView ? { ...d, keepAliveView, heldConnected } : { ...d, heldConnected };
         });
         return {
           ...acc,
@@ -4723,6 +4724,32 @@ function rewardNeedsDesktop(prodId, prodType) {
       jsonResponse(res, await getClient(acc).enterAndExitDesktop(instanceId));
     } catch (e) {
       jsonResponse(res, { error: e.message || '进入后退出失败' }, 400);
+    }
+    return;
+  }
+
+  // 手动进入并保持连接；关闭开关只断开桌面会话，不操作云电脑电源。
+  if (req.method === 'POST' && pathname === '/api/accounts/ecloud/hold') {
+    const session = getSessionFromReq(req);
+    if (!session) { jsonResponse(res, { error: '未授权' }, 401); return; }
+    const body = await parseJsonBody(req).catch(() => ({}));
+    const acc = appConfig.accounts.find(a => a.id === body.accountId && a.platform === 'ecloud');
+    if (!acc) { jsonResponse(res, { error: '未找到该移动公众账号' }, 404); return; }
+    if (!canUserAccessAccount(session, acc)) { jsonResponse(res, { error: '权限不足' }, 403); return; }
+    const instanceId = String(body.instanceId || '');
+    const desktop = (acc.desktops || []).find(d => String(d.instanceId) === instanceId);
+    if (!desktop) { jsonResponse(res, { error: '账号下找不到这台云电脑' }, 400); return; }
+    if (!['connect', 'disconnect'].includes(body.action)) {
+      jsonResponse(res, { error: '操作无效' }, 400); return;
+    }
+    try {
+      const client = getClient(acc);
+      const result = body.action === 'connect'
+        ? await client.enterAndStayDesktop(instanceId)
+        : await client.exitHeldDesktop(instanceId);
+      jsonResponse(res, result);
+    } catch (e) {
+      jsonResponse(res, { error: e.message || '桌面连接操作失败' }, 400);
     }
     return;
   }
