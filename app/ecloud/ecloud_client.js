@@ -26,6 +26,7 @@
  */
 
 const { EcloudEngine, EngineState } = require('./ecloud_engine');
+const { connectOnce, isConnectionBusy } = require('./cmss_connect');
 
 /** 日志来源标识（后端 inferLogPlatform 据此归入 ecloud 平台流） */
 const LOG_SOURCE = 'ECLOUD';
@@ -33,6 +34,9 @@ const LOG_SOURCE = 'ECLOUD';
 const TICK_INTERVAL_MS = 20000;
 /** 桌面列表静默刷新间隔 */
 const DESKTOP_REFRESH_MS = 10 * 60 * 1000;
+/** 真实进入后退出：平台约 24 小时未进入会关机，提前 4 小时重新进入。 */
+const AUTO_ENTER_INTERVAL_MS = 20 * 60 * 60 * 1000;
+const AUTO_ENTER_RETRY_MS = 30 * 60 * 1000;
 /** L1/L2 缺省周期（秒）——可由账号/单机字段覆盖 */
 const DEFAULT_L1_INTERVAL_SEC = 300;
 /**
@@ -296,7 +300,7 @@ class EcloudClient {
   async loginInteractive(branch, code, opts = {}) {
     await this.startEngine();
     if (!branch) {
-      const r = await this.engine.loginBegin(this.sessionId, this._loginParams());
+      const r = await this.engine.loginBegin(this.sessionId, { ...this._loginParams(), preserveOnInteractive: !!opts.preserveOnInteractive });
       if (r && r.status === 'success') {
         this._sessionReady = true;
         this.metrics.sessionSource = 'login';
@@ -354,6 +358,43 @@ class EcloudClient {
   }
 
   // ---------------------------------------------------------------- 桌面列表
+  async enterAndExitDesktop(instanceId) {
+    await this.ensureSession();
+    const desktop = (this.account.desktops || []).find(d => String(d.instanceId) === String(instanceId));
+    if (!desktop) throw new Error('账号下找不到这台云电脑，请先同步桌面列表');
+    const label = desktop.machineName || desktop.instanceId;
+    this._log(`[${label}] 开始一次真实进入，连接成功后自动退出`, 'info');
+    let info;
+    try {
+      info = await this.engine.desktopConnectInfo(this.sessionId, { instanceId });
+      const result = await connectOnce(info, {
+        onConnected: () => this.engine.desktopReportConnect(this.sessionId, {
+          machineId: info.machineId,
+          machineName: info.machineName,
+          connectId: info.connectId,
+        }),
+      });
+      const currentDesktop = (this.account.desktops || []).find(d => String(d.instanceId) === String(instanceId)) || desktop;
+      currentDesktop.lastRealEnterAt = result.connectedAt;
+      currentDesktop.lastRealExitAt = result.disconnectedAt;
+      this.saveConfig();
+      this._recordDesktopAction(instanceId, '已真实进入并自动退出', 'success');
+      if (!result.reported) this._log(`[${label}] 平台会话登记未确认：${result.reportError || '未知错误'}`, 'warn');
+      this._log(`[${label}] 桌面组件确认连接成功，随后已自动断开（会话登记${result.reported ? '成功' : '未确认'}）`, 'success');
+      return {
+        success: true,
+        message: `已进入 ${label} 并自动退出，云电脑未关机`,
+        connectedAt: result.connectedAt,
+        disconnectedAt: result.disconnectedAt,
+        sessionReported: result.reported,
+        reportError: result.reportError || '',
+      };
+    } catch (e) {
+      this._log(`[${label}] 进入后退出未完成：${e.message}`, 'error');
+      throw e;
+    }
+  }
+
   async refreshDesktops() {
     const accName = this.account.name || this.account.user;
     try {
@@ -374,6 +415,9 @@ class EcloudClient {
           if (old.keepaliveInterval !== undefined) d.keepaliveInterval = old.keepaliveInterval;
           if (old.lastKeepAliveAt !== undefined) d.lastKeepAliveAt = old.lastKeepAliveAt;
           if (old.uptime !== undefined) d.uptime = old.uptime;
+          if (old.realEnterEnabled !== undefined) d.realEnterEnabled = old.realEnterEnabled;
+          if (old.lastRealEnterAt !== undefined) d.lastRealEnterAt = old.lastRealEnterAt;
+          if (old.lastRealExitAt !== undefined) d.lastRealExitAt = old.lastRealExitAt;
         } else if (d.keepaliveEnabled === undefined) {
           d.keepaliveEnabled = true;
         }
@@ -722,6 +766,25 @@ class EcloudClient {
             acted = true;
           } catch (e) {
             this._recordDesktopAction(d.instanceId, `L2 异常: ${e.message}`, 'error');
+          }
+        }
+
+        // 真实进入按单机开关执行，每轮最多一台，避免同时抢占用户的桌面会话。
+        // 未成功的任务 30 分钟后重试；只有组件确认连接且断开才更新 20 小时计时。
+        if (!isConnectionBusy()) {
+          const due = (this.account.desktops || []).find(d =>
+            d.realEnterEnabled === true
+            && d.originCompanyCode === 'CMSSZTE'
+            && this._effectivePowerState(d).state === 'on'
+            && now - (d.lastRealEnterAt || 0) >= AUTO_ENTER_INTERVAL_MS
+            && now - (d._lastAutoEnterAttemptAt || 0) >= AUTO_ENTER_RETRY_MS);
+          if (due) {
+            due._lastAutoEnterAttemptAt = now;
+            try {
+              await this.enterAndExitDesktop(due.instanceId);
+            } catch (e) {
+              this._log(`[${due.machineName || due.instanceId}] 定时进入后退出失败：${e.message}`, 'warning');
+            }
           }
         }
 

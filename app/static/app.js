@@ -852,6 +852,9 @@ function buildAccountCardElement(acc, slotIndex) {
 
               // instanceId 很长（CCA-<32hex>）且整行会被 ellipsis 截断 ⇒ 悬停用 title 给出完整文本
               const iidLineText = `instanceId: ${iid || '—'}`;
+              const lastRealEnterText = d.lastRealEnterAt
+                ? `上次真实进入：${new Date(d.lastRealEnterAt).toLocaleString('zh-CN')}`
+                : '尚未真实进入';
 
               let keepClass = isKeepaliveOn ? 'pill-on-keepalive' : 'pill-off-keepalive';
               let keepText = isKeepaliveOn ? '开' : '关';
@@ -892,7 +895,12 @@ function buildAccountCardElement(acc, slotIndex) {
                            常驻可点（能力可见）；平台认为机器在运行时点击会得到平台原话的如实拒绝
                            （"当前状态为已开机，不允许进行如下操作:开机"），不会产生任何副作用。 -->
                       <button type="button" class="pill-toggle-btn pill-action-boot" id="pill-boot-${acc.id}-${escapeHtml(iid)}" onclick="bootEcloudDesktop('${acc.id}', '${escapeHtml(iid)}', '${escapeHtml(d.machineName || '')}')" title="${escapeHtml((view && view.powerOnHint) ? `平台开机操作提示：${view.powerOnHint}` : '通过平台官方 operate 通道开机（真机验证可受理；受理后约数十秒进入运行中）')}">🖥️ 开机</button>
+                      ${d.originCompanyCode === 'CMSSZTE' ? `
+                        <button type="button" class="pill-toggle-btn" id="pill-enter-${acc.id}-${escapeHtml(iid)}" onclick="enterEcloudDesktopOnce('${acc.id}', '${escapeHtml(iid)}', '${escapeHtml(d.machineName || '')}')" title="使用本机移动云电脑组件真实进入；连接成功后自动断开，不关机">🚪 进入后退出</button>
+                        <button type="button" class="pill-toggle-btn ${d.realEnterEnabled === true ? 'pill-on-keepalive' : 'pill-off-keepalive'}" id="pill-real-enter-${acc.id}-${escapeHtml(iid)}" onclick="toggleVmFeature('${acc.id}', '${escapeHtml(iid)}', 'realEnterEnabled', ${d.realEnterEnabled !== true})" title="开启后约每 20 小时自动真实进入一次，连接成功约 5 秒后断开；仅在本机面板运行时执行，不关机">🕒自动进入: ${d.realEnterEnabled === true ? '开' : '关'}</button>
+                      ` : ''}
                     </div>
+                    <div style="font-size: 10px; color: #64748b; padding-top: 4px;">${escapeHtml(lastRealEnterText)}</div>
                   </div>
                 </div>
               `;
@@ -2133,7 +2141,7 @@ async function toggleVmFeature(accId, vmKey, featureName, nextVal) {
   // 【2026-09-23 修订】移动云"自动开机守护"开关已恢复放行，开机走 CAG HTTPS 干净通道
   // （账号自有 firm-auth 凭据 + RSA 公钥动态获取 + 保留 TLS 证书校验）。
   // 伪造身份 / 硬编码第三方凭据 / 关证书 等红线仍被回归组 7 机械拦截。
-  // 支持的单机开关：keepaliveEnabled / taskEnabled / autoBootEnabled / keepaliveInterval
+  // 支持的单机开关：keepaliveEnabled / taskEnabled / autoBootEnabled / realEnterEnabled / keepaliveInterval
 
   const acc = accounts.find(a => a.id === accId);
   if (!acc) return;
@@ -2176,6 +2184,11 @@ async function toggleVmFeature(accId, vmKey, featureName, nextVal) {
     onClass = 'pill-on-keepalive';
     offClass = 'pill-off-keepalive';
     labelPrefix = '🛡️守护: ';
+  } else if (featureName === 'realEnterEnabled') {
+    prefixKey = 'pill-real-enter-';
+    onClass = 'pill-on-keepalive';
+    offClass = 'pill-off-keepalive';
+    labelPrefix = '🕒自动进入: ';
   }
 
   const pillBtn = prefixKey ? document.getElementById(prefixKey + accId + '-' + vmKey) : null;
@@ -2189,6 +2202,7 @@ async function toggleVmFeature(accId, vmKey, featureName, nextVal) {
   const featureCn = featureName === 'keepaliveEnabled' ? '单机独立保活'
     : featureName === 'taskEnabled' ? '单机自动化任务'
     : featureName === 'autoBootEnabled' ? '单机自动开机守护'
+    : featureName === 'realEnterEnabled' ? '定时进入后退出'
     : featureName;
   try {
     const res = await authFetch(`/api/accounts/${accId}/vm-feature`, {
@@ -2998,6 +3012,57 @@ async function bootEcloudDesktop(accId, instanceId, vmName = '') {
     showToast("开机请求异常: " + e.message, "error");
   }
   await loadAccounts(true);
+}
+
+async function enterEcloudDesktopOnce(accId, instanceId, vmName = '') {
+  const label = vmName ? `「${vmName}」` : '该云电脑';
+  const button = document.getElementById(`pill-enter-${accId}-${instanceId}`);
+  if (button) { button.disabled = true; button.innerText = '连接中…'; }
+  showToast(`正在进入 ${label}，连接成功后会自动退出`, 'info');
+  try {
+    let res = await authFetch('/api/accounts/ecloud/enter-once', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ accountId: accId, instanceId })
+    });
+    let data = await res.json().catch(() => ({}));
+    if (!res.ok && /缺少连接票据/.test(String(data.error || ''))) {
+      showToast('首次使用需要补领连接票据，正在验证账号', 'info');
+      const loginRes = await authFetch('/api/accounts/ecloud/reauth', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ accountId: accId })
+      });
+      const loginData = await loginRes.json().catch(() => ({}));
+      if (loginData.needVerification) {
+        if (!loginData.smsSent) throw new Error(loginData.smsError || '验证码下发失败');
+        const code = window.prompt(`验证码已发送至 ${loginData.mobile || '绑定手机'}。请输入短信验证码：`);
+        if (!code || !code.trim()) throw new Error('已取消短信验证，本次未进入云电脑');
+        const verifyRes = await authFetch('/api/accounts/ecloud/login', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ pendingId: loginData.pendingId, code: code.trim(), mobile: loginData.mobile })
+        });
+        const verifyData = await verifyRes.json().catch(() => ({}));
+        if (!verifyRes.ok || !verifyData.success) throw new Error(verifyData.error || '短信验证失败');
+      } else if (!loginRes.ok || !loginData.success) {
+        throw new Error(loginData.error || '连接票据刷新失败');
+      }
+      res = await authFetch('/api/accounts/ecloud/enter-once', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ accountId: accId, instanceId })
+      });
+      data = await res.json().catch(() => ({}));
+    }
+    if (res.ok && data.success) showToast(data.message, 'success');
+    else showToast(data.error || `进入失败（HTTP ${res.status}）`, 'error');
+  } catch (e) {
+    showToast(`进入请求失败：${e.message}`, 'error');
+  } finally {
+    if (button) { button.disabled = false; button.innerText = '🚪 进入后退出'; }
+    await loadAccounts(true);
+  }
 }
 
 // 【2026-09-26】"机器没开机 ⇒ 本次压根没执行"必须与真失败分开渲染。
