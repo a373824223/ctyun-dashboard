@@ -893,6 +893,7 @@ function buildAccountCardElement(acc, slotIndex) {
               // 平台 machineList[].expireTime 是服务期限（Unix 毫秒），与开机/在线时长无关。
               const serviceExpiryMs = Number(d.expireTime);
               const serviceExpiryValid = Number.isFinite(serviceExpiryMs) && serviceExpiryMs > 0;
+              const serviceExpiryWarn = serviceExpiryValid && serviceExpiryMs - Date.now() <= 5 * 24 * 60 * 60 * 1000;
               const serviceExpiryText = serviceExpiryValid
                 ? new Date(serviceExpiryMs).toLocaleString('zh-CN', {
                     timeZone: 'Asia/Shanghai', year: 'numeric', month: '2-digit', day: '2-digit',
@@ -945,7 +946,7 @@ function buildAccountCardElement(acc, slotIndex) {
                         <button type="button" class="pill-toggle-btn ${d.realEnterEnabled === true ? (isAutoEnterEnabled ? 'pill-on-keepalive' : 'pill-paused') : 'pill-off-keepalive'}" id="pill-real-enter-${acc.id}-${escapeHtml(iid)}" onclick="toggleVmFeature('${acc.id}', '${escapeHtml(iid)}', 'realEnterEnabled', ${d.realEnterEnabled !== true})" title="单机自动进入需账号级「自动进入」同时开启；约每 20 小时真实进入一次，连接成功后自动断开，不关机">🕒自动进入: ${d.realEnterEnabled === true ? (isAutoEnterEnabled ? '开' : '待命(总关)') : '关'}</button>
                       ` : ''}
                     </div>
-                    <div style="font-size: 10px; color: ${serviceExpiryValid && serviceExpiryMs <= Date.now() ? '#dc2626' : '#64748b'}; padding-top: 4px;" title="平台返回的云电脑服务有效期；北京时间，与开机状态无关">服务到期：${serviceExpiryValid ? `${escapeHtml(serviceExpiryText)}${serviceExpiryMs <= Date.now() ? '（已到期）' : ''}` : '未提供'}</div>
+                    <div style="font-size: 10px; color: ${serviceExpiryWarn ? '#dc2626' : '#64748b'}; padding-top: 4px;" title="平台返回的云电脑服务有效期；到期前 5 天内及已到期显示红色；北京时间">服务到期：${serviceExpiryValid ? `${escapeHtml(serviceExpiryText)}${serviceExpiryMs <= Date.now() ? '（已到期）' : ''}` : '未提供'}</div>
                     <div style="font-size: 10px; color: #64748b; padding-top: 2px;">${escapeHtml(lastRealEnterText)}</div>
                   </div>
                 </div>
