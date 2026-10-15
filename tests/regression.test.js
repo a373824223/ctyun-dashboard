@@ -1927,6 +1927,41 @@ test('静态：accessToken 主动续期（平台 TTL≈30 分钟，提前 25 分
   );
 });
 
+testAsync('行为：恢复旧令牌按真实签发时间续期，401 只重登一次并重试操作', async () => {
+  const { EcloudClient } = require(path.join(ROOT, 'app/ecloud/ecloud_client.js'));
+  const client = new EcloudClient(
+    { id: 'ec_token_test', platform: 'ecloud', user: 'test', password: 'test', desktops: [] },
+    { appendLog: () => {}, saveConfig: () => {} }
+  );
+  const issuedAt = Math.floor((Date.now() - 30 * 60 * 1000) / 1000);
+  let relogins = 0;
+  let valid = false;
+  client.startEngine = async () => ({});
+  client.engine = {
+    request: async (op) => {
+      if (op === 'session.restore') return { restored: true, tokenIssuedAt: issuedAt };
+      if (op === 'session.relogin') {
+        relogins++;
+        await new Promise(resolve => setTimeout(resolve, 10));
+        valid = true;
+        return { relogged: true };
+      }
+      throw new Error(`未知操作: ${op}`);
+    },
+  };
+  await client.ensureSession();
+  assert.ok(Math.abs(client._lastTokenRefreshAt - issuedAt * 1000) < 1000,
+    '恢复会话不得把旧令牌的签发时间改成当前时间');
+  const action = async () => {
+    if (!valid) throw new Error('EcloudError: [401] token失效');
+    return '成功';
+  };
+  assert.deepStrictEqual(await Promise.all([
+    client._withTokenRecovery(action), client._withTokenRecovery(action),
+  ]), ['成功', '成功']);
+  assert.strictEqual(relogins, 1, '并发 401 只能发起一次密码重登');
+});
+
 test('静态：移动公众开机能力接线（sidecar op → 引擎 → 客户端 → API → UI，受理≠生效的诚实口径）', () => {
   // 【2026-09-28】开机能力正式接入：平台官方 operate 通道（available=开机，asar 客户端同款语义）。
   // 此前服务端对该平台返回 501「暂不支持电源控制」——那正是页面"不具备开机能力"的来源，必须消失。

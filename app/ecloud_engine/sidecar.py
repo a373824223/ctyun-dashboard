@@ -154,6 +154,8 @@ def _persist_sessions() -> None:
                 "accessToken": s.get("accessToken") or "",
                 "accessTicket": s.get("accessTicket") or "",
                 "savedAt": int(time.time()),
+                # 会话文件可能因其它账号登录而重写；令牌签发时间不能跟着刷新。
+                "tokenIssuedAt": int(s.get("tokenIssuedAt") or time.time()),
             }
         _SESSION_FILE.parent.mkdir(parents=True, exist_ok=True)
         tmp = _SESSION_FILE.with_suffix(".tmp")
@@ -230,6 +232,7 @@ def op_login_begin(params: dict) -> dict:
         "loginCode": r.get("login_code"), "status": status,
         "accessToken": http.access_token, "updatedAt": time.time(),
         "accessTicket": r.get("access_ticket") or "",
+        "tokenIssuedAt": time.time() if status == login_mod.LoginResult.SUCCESS else 0,
     }
     if params.get("preserveOnInteractive") and status != login_mod.LoginResult.SUCCESS and sid in _SESSIONS:
         # 补领连接票据可能需要短信；旧 token 继续供周期保活使用。
@@ -295,6 +298,7 @@ def op_login_sms(params: dict) -> dict:
         s["accessToken"] = http.access_token
         s["accessTicket"] = r.get("access_ticket") or ""
         s["status"] = r.get("status")
+        s["tokenIssuedAt"] = time.time()
         _SESSIONS[sid] = s
         _persist_sessions()
     s["updatedAt"] = time.time()
@@ -331,11 +335,13 @@ def op_session_restore(params: dict) -> dict:
         "status": "restored",
         "accessToken": saved["accessToken"],
         "accessTicket": saved.get("accessTicket") or "",
+        "tokenIssuedAt": saved.get("tokenIssuedAt") or saved.get("savedAt") or 0,
         "updatedAt": time.time(),
         "restoredAt": time.time(),
     }
     _emit_log("info", "已从本地保存的 token 恢复会话（免重复登录）")
-    return {"restored": True, "accessToken": saved["accessToken"]}
+    return {"restored": True, "accessToken": saved["accessToken"],
+            "tokenIssuedAt": saved.get("tokenIssuedAt") or saved.get("savedAt") or 0}
 
 
 def op_session_relogin(params: dict) -> dict:
@@ -370,6 +376,7 @@ def op_session_relogin(params: dict) -> dict:
             "deviceUid": device_uid, "accessToken": http.access_token,
             "accessTicket": r.get("access_ticket") or "",
             "status": status, "updatedAt": time.time(),
+            "tokenIssuedAt": time.time(),
         })
         _persist_sessions()
         # quiet=true：调用方（如周期主动续期）自行落一条更准确的日志，避免"重登成功"误导排查

@@ -3026,8 +3026,8 @@ async function enterEcloudDesktopOnce(accId, instanceId, vmName = '') {
       body: JSON.stringify({ accountId: accId, instanceId })
     });
     let data = await res.json().catch(() => ({}));
-    if (!res.ok && /缺少连接票据/.test(String(data.error || ''))) {
-      showToast('首次使用需要补领连接票据，正在验证账号', 'info');
+    if (!res.ok && /缺少连接票据|登录令牌已失效|需要短信验证/.test(String(data.error || ''))) {
+      showToast('正在重新验证移动公众账号', 'info');
       const loginRes = await authFetch('/api/accounts/ecloud/reauth', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
