@@ -73,6 +73,7 @@ class Desktop:
     machine_id: str           # UUID，machineConnect 用
     machine_name: str = ""
     computer_name: str = ""   # 云电脑内的 Windows 客户端名称（customParams.computerName）
+    expire_time_ms: int | None = None  # 服务到期时间（machineList[].expireTime，Unix 毫秒）
     origin_company_code: str = ""   # CMSSZTE / ZTE / H3C / Inspur
     resource_pool_uid: str = ""
     status: str = ""          # 来自 getDesktopStatus
@@ -116,6 +117,7 @@ def get_desktop_list(http: EcloudHttpUtil) -> list[Desktop]:
             machine_id=m.get("machineId", ""),
             machine_name=m.get("machineName", ""),
             computer_name=str(custom_params.get("computerName") or m.get("computerName") or "").strip(),
+            expire_time_ms=(int(m["expireTime"]) if str(m.get("expireTime") or "").isdigit() else None),
             origin_company_code=m.get("originCompanyCode", ""),
             resource_pool_uid=m.get("resourcePoolUid", ""),
             custom_login_params=clp if clp not in ("", None) else None,

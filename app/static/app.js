@@ -890,6 +890,15 @@ function buildAccountCardElement(acc, slotIndex) {
               const lastRealEnterText = d.lastRealEnterAt
                 ? `上次真实进入：${new Date(d.lastRealEnterAt).toLocaleString('zh-CN')}`
                 : '尚未真实进入';
+              // 平台 machineList[].expireTime 是服务期限（Unix 毫秒），与开机/在线时长无关。
+              const serviceExpiryMs = Number(d.expireTime);
+              const serviceExpiryValid = Number.isFinite(serviceExpiryMs) && serviceExpiryMs > 0;
+              const serviceExpiryText = serviceExpiryValid
+                ? new Date(serviceExpiryMs).toLocaleString('zh-CN', {
+                    timeZone: 'Asia/Shanghai', year: 'numeric', month: '2-digit', day: '2-digit',
+                    hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false
+                  })
+                : '';
 
               let keepClass = isKeepaliveOn ? 'pill-on-keepalive' : 'pill-off-keepalive';
               let keepText = isKeepaliveOn ? '开' : '关';
@@ -936,7 +945,8 @@ function buildAccountCardElement(acc, slotIndex) {
                         <button type="button" class="pill-toggle-btn ${d.realEnterEnabled === true ? (isAutoEnterEnabled ? 'pill-on-keepalive' : 'pill-paused') : 'pill-off-keepalive'}" id="pill-real-enter-${acc.id}-${escapeHtml(iid)}" onclick="toggleVmFeature('${acc.id}', '${escapeHtml(iid)}', 'realEnterEnabled', ${d.realEnterEnabled !== true})" title="单机自动进入需账号级「自动进入」同时开启；约每 20 小时真实进入一次，连接成功后自动断开，不关机">🕒自动进入: ${d.realEnterEnabled === true ? (isAutoEnterEnabled ? '开' : '待命(总关)') : '关'}</button>
                       ` : ''}
                     </div>
-                    <div style="font-size: 10px; color: #64748b; padding-top: 4px;">${escapeHtml(lastRealEnterText)}</div>
+                    <div style="font-size: 10px; color: ${serviceExpiryValid && serviceExpiryMs <= Date.now() ? '#dc2626' : '#64748b'}; padding-top: 4px;" title="平台返回的云电脑服务有效期；北京时间，与开机状态无关">服务到期：${serviceExpiryValid ? `${escapeHtml(serviceExpiryText)}${serviceExpiryMs <= Date.now() ? '（已到期）' : ''}` : '未提供'}</div>
+                    <div style="font-size: 10px; color: #64748b; padding-top: 2px;">${escapeHtml(lastRealEnterText)}</div>
                   </div>
                 </div>
               `;

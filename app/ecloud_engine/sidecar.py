@@ -484,6 +484,7 @@ def op_desktop_list(params: dict) -> dict:
             "machineId": d.machine_id,
             "machineName": d.machine_name,
             "computerName": d.computer_name,
+            "expireTime": d.expire_time_ms,
             "originCompanyCode": d.origin_company_code,
             "resourcePoolUid": d.resource_pool_uid,
             # 服务端原始值（界面 title 里展示，便于排查对不上的新枚举）
