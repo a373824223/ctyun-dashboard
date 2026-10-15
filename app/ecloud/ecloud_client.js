@@ -37,6 +37,12 @@ const DESKTOP_REFRESH_MS = 10 * 60 * 1000;
 /** 真实进入后退出：平台约 24 小时未进入会关机，提前 4 小时重新进入。 */
 const AUTO_ENTER_INTERVAL_MS = 20 * 60 * 60 * 1000;
 const AUTO_ENTER_RETRY_MS = 30 * 60 * 1000;
+function isAutoEnterEnabled(account) {
+  const configured = account.features?.autoEnter;
+  if (configured !== undefined) return configured === true;
+  // 兼容旧账号：原来只提供单机开关，保留已经启用的自动进入任务。
+  return (account.desktops || []).some(d => d.realEnterEnabled === true);
+}
 /** L1/L2 缺省周期（秒）——可由账号/单机字段覆盖 */
 const DEFAULT_L1_INTERVAL_SEC = 300;
 /**
@@ -828,7 +834,7 @@ class EcloudClient {
 
         // 真实进入按单机开关执行，每轮最多一台，避免同时抢占用户的桌面会话。
         // 未成功的任务 30 分钟后重试；只有组件确认连接且断开才更新 20 小时计时。
-        if (!isConnectionBusy()) {
+        if (isAutoEnterEnabled(this.account) && !isConnectionBusy()) {
           const due = (this.account.desktops || []).find(d =>
             d.realEnterEnabled === true
             && d.originCompanyCode === 'CMSSZTE'
@@ -957,4 +963,4 @@ class EcloudClient {
   }
 }
 
-module.exports = { EcloudClient, LOG_SOURCE, INTERACTIVE_BRANCHES };
+module.exports = { EcloudClient, LOG_SOURCE, INTERACTIVE_BRANCHES, isAutoEnterEnabled };

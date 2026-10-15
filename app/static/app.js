@@ -706,12 +706,9 @@ function buildEcloudDesktopMonitorHtml(acc) {
     // 视图缺失时降级：只陈述客观事实，绝不臆造"当前动作"
     if (!view) {
       return `
-        <div class="ec-mon-row" style="display: flex; flex-direction: column; gap: 2px; padding: 5px 0; border-top: 1px dashed var(--border);">
-          <div style="display: flex; align-items: baseline; gap: 5px; overflow: hidden; white-space: nowrap; min-width: 0;">
-            <span style="flex-shrink: 0;">🟣</span>
-            <span style="font-size: 12px; font-weight: 700; color: #0f172a; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">${escapeHtml(name)}</span>
-          </div>
-          <div style="font-size: 11.5px; color: #94a3b8; padding-left: 16px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">当前动作: 等待后端状态同步…</div>
+        <div class="ec-mon-row" id="ec-mon-${acc.id}-${escapeHtml(iid)}">
+          <div class="ec-mon-name" title="${escapeHtml(name)} · ${escapeHtml(iid)}"><span>🟣</span><strong>${escapeHtml(name)}</strong><small>${escapeHtml(iid.slice(-8))}</small></div>
+          <div class="ec-mon-action" style="color: #94a3b8;"><span style="flex-shrink: 0; font-size: 11.5px; color: #64748b;">当前动作:</span><span>等待后端状态同步…</span></div>
         </div>
       `;
     }
@@ -747,17 +744,10 @@ function buildEcloudDesktopMonitorHtml(acc) {
     // 【2026-09-25 用户要求·第七轮】主机名同样补上显式 12px —— 理由与移动爱家监视行完全一致：
     // 这些 span 不写字号就会继承浏览器默认 16px，而周围是 11 / 11.5 / 12px，于是看着"字体偏大"。
     return `
-      <div class="ec-mon-row" id="ec-mon-${acc.id}-${escapeHtml(iid)}" style="display: flex; flex-direction: column; gap: 2px; padding: 5px 0; border-top: 1px dashed var(--border);">
-        <div style="display: flex; align-items: baseline; gap: 5px; overflow: hidden; white-space: nowrap; min-width: 0;">
-          <span style="flex-shrink: 0;">${dot}</span>
-          <span style="font-size: 12px; font-weight: 700; color: #0f172a; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">${escapeHtml(name)}</span>
-        </div>
-        <div style="display: flex; align-items: baseline; gap: 4px; overflow: hidden; white-space: nowrap; min-width: 0; padding-left: 16px;">
-          <span style="flex-shrink: 0; font-size: 11.5px; color: #64748b;">当前动作:</span>
-          <span title="${escapeHtml(actionText)}" style="font-size: 11.5px; color: ${toneColor}; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">${escapeHtml(actionText)}</span>
-        </div>
-        <div title="${escapeHtml(lastTextFull)}" style="font-size: 11.5px; color: #475569; padding-left: 16px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">${lastText}${view.uptime ? ` · 在线时长: <b>${escapeHtml(String(view.uptime))}</b>` : ''}</div>
-        <div title="instanceId: ${escapeHtml(iid)}" style="font-size: 11px; color: #94a3b8; padding-left: 16px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">instanceId: ${escapeHtml(iid)}</div>
+      <div class="ec-mon-row" id="ec-mon-${acc.id}-${escapeHtml(iid)}">
+        <div class="ec-mon-name" title="${escapeHtml(name)} · ${escapeHtml(iid)}"><span>${dot}</span><strong>${escapeHtml(name)}</strong><small>${escapeHtml(iid.slice(-8))}</small></div>
+        <div class="ec-mon-action"><span style="flex-shrink: 0; font-size: 11.5px; color: #64748b;">当前动作:</span><span title="${escapeHtml(actionText)}" style="font-size: 11.5px; color: ${toneColor};">${escapeHtml(actionText)}</span></div>
+        <div class="ec-mon-meta" title="${escapeHtml(lastTextFull)}">${lastText}${view.uptime ? ` · 在线时长: <b>${escapeHtml(String(view.uptime))}</b>` : ''}</div>
       </div>
     `;
   }).join('');
@@ -767,6 +757,7 @@ function buildEcloudDesktopMonitorHtml(acc) {
 function buildAccountCardElement(acc, slotIndex) {
   const card = document.createElement("div");
   card.className = "account-card";
+  if (acc.platform === 'ecloud') card.classList.add('account-card--ecloud');
   card.id = `acc-card-${acc.id}`;
   card.dataset.accId = acc.id;
   card.dataset.slot = slotIndex;
@@ -802,6 +793,8 @@ function buildAccountCardElement(acc, slotIndex) {
     const desktopsCountText = desktops.length > 0 ? `名下云主机 (${desktops.length}台)` : '云主机';
 
     const isGlobalKeepAliveOff = f.keepAlive === false;
+    const isAutoEnterEnabled = f.autoEnter === true ||
+      (f.autoEnter === undefined && desktops.some(d => d.realEnterEnabled === true));
 
     let ecMultiStatusBadge = '';
     if (isGlobalKeepAliveOff) {
@@ -826,12 +819,12 @@ function buildAccountCardElement(acc, slotIndex) {
     let desktopsHtml = '';
     if (desktops.length > 0) {
       desktopsHtml = `
-        <div style="background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 8px; padding: 10px 12px;">
+        <div class="ecloud-desktops-panel">
           <div style="font-size: 12px; font-weight: 700; color: #334155; margin-bottom: 6px; display: flex; justify-content: space-between;">
-            <span>🖥️ ${desktopsCountText}</span>
+            <span>🖥️ ${desktopsCountText}${desktops.length > 9 ? ' <small style="font-weight: 400; color: #64748b;">· 区域内滚动查看更多</small>' : ''}</span>
             <span id="acc-multi-status-${acc.id}">${ecMultiStatusBadge}</span>
           </div>
-          <div style="display: flex; flex-direction: column; gap: 6px;">
+          <div class="ecloud-desktop-grid ${desktops.length > 9 ? 'ecloud-list-scroll' : ''}">
             ${desktops.map(d => {
               const iid = String(d.instanceId || '');
               const isKeepaliveOn = d.keepaliveEnabled !== false;
@@ -897,7 +890,7 @@ function buildAccountCardElement(acc, slotIndex) {
                       <button type="button" class="pill-toggle-btn pill-action-boot" id="pill-boot-${acc.id}-${escapeHtml(iid)}" onclick="bootEcloudDesktop('${acc.id}', '${escapeHtml(iid)}', '${escapeHtml(d.machineName || '')}')" title="${escapeHtml((view && view.powerOnHint) ? `平台开机操作提示：${view.powerOnHint}` : '通过平台官方 operate 通道开机（真机验证可受理；受理后约数十秒进入运行中）')}">🖥️ 开机</button>
                       ${d.originCompanyCode === 'CMSSZTE' ? `
                         <button type="button" class="pill-toggle-btn" id="pill-enter-${acc.id}-${escapeHtml(iid)}" onclick="enterEcloudDesktopOnce('${acc.id}', '${escapeHtml(iid)}', '${escapeHtml(d.machineName || '')}')" title="使用本机移动云电脑组件真实进入；连接成功后自动断开，不关机">🚪 进入后退出</button>
-                        <button type="button" class="pill-toggle-btn ${d.realEnterEnabled === true ? 'pill-on-keepalive' : 'pill-off-keepalive'}" id="pill-real-enter-${acc.id}-${escapeHtml(iid)}" onclick="toggleVmFeature('${acc.id}', '${escapeHtml(iid)}', 'realEnterEnabled', ${d.realEnterEnabled !== true})" title="开启后约每 20 小时自动真实进入一次，连接成功约 5 秒后断开；仅在本机面板运行时执行，不关机">🕒自动进入: ${d.realEnterEnabled === true ? '开' : '关'}</button>
+                        <button type="button" class="pill-toggle-btn ${d.realEnterEnabled === true ? (isAutoEnterEnabled ? 'pill-on-keepalive' : 'pill-paused') : 'pill-off-keepalive'}" id="pill-real-enter-${acc.id}-${escapeHtml(iid)}" onclick="toggleVmFeature('${acc.id}', '${escapeHtml(iid)}', 'realEnterEnabled', ${d.realEnterEnabled !== true})" title="单机自动进入需账号级「自动进入」同时开启；约每 20 小时真实进入一次，连接成功后自动断开，不关机">🕒自动进入: ${d.realEnterEnabled === true ? (isAutoEnterEnabled ? '开' : '待命(总关)') : '关'}</button>
                       ` : ''}
                     </div>
                     <div style="font-size: 10px; color: #64748b; padding-top: 4px;">${escapeHtml(lastRealEnterText)}</div>
@@ -950,13 +943,13 @@ function buildAccountCardElement(acc, slotIndex) {
            平台名 + 板块名，与移动爱家标题风格对齐（旧后缀原文见 git 历史与测试注释，此处不复述，
            否则会撞到"后缀必须删除"的反向断言）。删的只是**标题后缀文字**，
            "分层明细走日志流"这条事实与实现完全不变。 -->
-      <details class="features-box" ${isDetailsOpen(acc.id, 'ec-monitor') ? 'open' : ''} ontoggle="saveDetailsState('${acc.id}', 'ec-monitor', this.open)">
+      <details class="features-box ecloud-monitor-panel" ${isDetailsOpen(acc.id, 'ec-monitor') ? 'open' : ''} ontoggle="saveDetailsState('${acc.id}', 'ec-monitor', this.open)">
         <summary style="display: flex; justify-content: space-between; align-items: center; cursor: pointer; font-size: 12.5px; font-weight: 700; color: #334155; user-select: none; gap: 6px;">
           <span style="color: #0369a1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">📡 移动公众 保活监视</span>
           <span style="font-size: 11px; color: var(--text-muted); font-weight: normal; flex-shrink: 0; white-space: nowrap;">点击收起/展开</span>
         </summary>
-        <div style="color: #475569; line-height: 1.7; display: flex; flex-direction: column; gap: 3px;">
-          <div id="acc-ec-mon-actions-${acc.id}" style="display: flex; flex-direction: column;">
+        <div style="color: #475569; line-height: 1.7; display: flex; flex-direction: column; gap: 8px;">
+          <div id="acc-ec-mon-actions-${acc.id}" class="ecloud-monitor-grid ${desktops.length > 9 ? 'ecloud-list-scroll' : ''}">
             ${buildEcloudDesktopMonitorHtml(acc)}
           </div>
           <div id="acc-active-info-${acc.id}" style="font-size: 11.5px; color: var(--text-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">账号汇总: <b style="color: #0f172a;">${escapeHtml(m.lastHeartbeatResult || '保活巡检待命')}</b> · 周期: <b>${buildIntervalOverviewText(acc)}</b></div>
@@ -1004,6 +997,13 @@ function buildAccountCardElement(acc, slotIndex) {
             <span title="L2 桌面登记保活：desktopUptime 逐台登记">🧩 L2 桌面登记保活</span>
             <label class="switch">
               <input type="checkbox" ${f.ecloudL2DesktopReg !== false ? 'checked' : ''} onchange="toggleFeature('${acc.id}', 'ecloudL2DesktopReg', this.checked)">
+              <span class="slider"></span>
+            </label>
+          </div>
+          <div class="feature-row">
+            <span title="开启后为名下支持进入的云电脑启用单机自动进入；约每 20 小时依次真实进入，连接成功后自动退出，不关机。可在上方逐台关闭。仅在本机面板运行且账号保活开启时执行。">🚪 自动进入</span>
+            <label class="switch">
+              <input type="checkbox" id="auto-enter-${acc.id}" ${isAutoEnterEnabled ? 'checked' : ''} onchange="toggleFeature('${acc.id}', 'autoEnter', this.checked)">
               <span class="slider"></span>
             </label>
           </div>
@@ -1821,6 +1821,8 @@ function renderAccounts(isSilent = false) {
 
   // 根据当前视图过滤账号
   const filteredAccounts = getFilteredAccounts();
+  container.classList.toggle('accounts-grid--ecloud-only',
+    filteredAccounts.length > 0 && filteredAccounts.every(acc => acc.platform === 'ecloud'));
 
   if (!filteredAccounts || filteredAccounts.length === 0) {
     const tabNameMap = { ydpc: '移动爱家', ctyun: '天翼云电脑', ecloud: '移动公众' };
@@ -2110,6 +2112,7 @@ async function toggleFeature(accId, featureKey, checked) {
   const acc = accounts.find(a => a.id === accId);
   if (!acc) return;
   acc.features = acc.features || {};
+  const previousValue = acc.features[featureKey];
   acc.features[featureKey] = checked;
 
   // 立即刷新卡片视图以联动反映单机与全局层叠状态
@@ -2122,16 +2125,23 @@ async function toggleFeature(accId, featureKey, checked) {
       body: JSON.stringify({ features: acc.features })
     });
     if (res.ok) {
+      if (acc.platform === 'ecloud' && featureKey === 'autoEnter') {
+        const updated = await res.json();
+        acc.desktops = updated.desktops || acc.desktops;
+        renderAccounts();
+      }
       showToast(`已${checked ? '开启' : '关闭'}该功能`, "success");
     } else {
       showToast("更新失败", "error");
       // 更新失败则还原界面的复选状态
-      acc.features[featureKey] = !checked;
+      if (previousValue === undefined) delete acc.features[featureKey];
+      else acc.features[featureKey] = previousValue;
       renderAccounts();
     }
   } catch (e) {
     showToast("网络请求异常: " + e.message, "error");
-    acc.features[featureKey] = !checked;
+    if (previousValue === undefined) delete acc.features[featureKey];
+    else acc.features[featureKey] = previousValue;
     renderAccounts();
   }
 }
@@ -2193,9 +2203,12 @@ async function toggleVmFeature(accId, vmKey, featureName, nextVal) {
 
   const pillBtn = prefixKey ? document.getElementById(prefixKey + accId + '-' + vmKey) : null;
   if (pillBtn) {
+    const pausedByAccount = isEcloud && featureName === 'realEnterEnabled'
+      && nextVal && acc.features?.autoEnter === false;
     pillBtn.classList.remove(onClass, offClass);
-    pillBtn.classList.add(nextVal ? onClass : offClass);
-    pillBtn.innerText = labelPrefix + (nextVal ? '开' : '关');
+    pillBtn.classList.remove('pill-paused');
+    pillBtn.classList.add(pausedByAccount ? 'pill-paused' : (nextVal ? onClass : offClass));
+    pillBtn.innerText = labelPrefix + (pausedByAccount ? '待命(总关)' : (nextVal ? '开' : '关'));
     pillBtn.onclick = () => toggleVmFeature(accId, vmKey, featureName, !nextVal);
   }
 
@@ -2211,6 +2224,10 @@ async function toggleVmFeature(accId, vmKey, featureName, nextVal) {
       body: JSON.stringify({ vmId: vmKey, desktopId: vmKey, feature: featureName, value: nextVal })
     });
     if (res.ok) {
+      if (isEcloud && featureName === 'realEnterEnabled' && acc.features?.autoEnter === undefined) {
+        const master = document.getElementById(`auto-enter-${acc.id}`);
+        if (master) master.checked = acc.desktops.some(d => d.realEnterEnabled === true);
+      }
       showToast(`已${nextVal ? '开启' : '关闭'}${featureCn}`, "success");
     } else {
       const data = await res.json();

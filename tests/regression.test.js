@@ -1754,10 +1754,27 @@ test('L1/L2 默认开启（【2026-09-26 用户拍板】L3 占位层已整层删
   assert.strictEqual(f.ecloudL1AccountKeep, true, 'L1 账号态保活默认开启');
   assert.strictEqual(f.ecloudL2DesktopReg, true, 'L2 桌面登记保活默认开启');
   assert.strictEqual(f.keepAlive, true, '账号级保活总开关默认开启');
+  assert.strictEqual(f.autoEnter, false, '新账号必须由用户主动开启自动进入');
   assert.strictEqual(
     'ecloudL3SpiceHeart' in f, false,
     'L3 字段必须从默认值里消失 —— 未实现的占位层不得再以任何形式暴露'
   );
+});
+
+test('移动公众账号级自动进入开关：兼容旧单机设置，关闭后阻止调度', () => {
+  const { isAutoEnterEnabled } = require(path.join(ROOT, 'app/ecloud/ecloud_client.js'));
+  const desktop = { realEnterEnabled: true };
+  assert.strictEqual(isAutoEnterEnabled({ features: {}, desktops: [desktop] }), true, '旧账号已开启的单机任务应继续运行');
+  assert.strictEqual(isAutoEnterEnabled({ features: { autoEnter: false }, desktops: [desktop] }), false, '账号级关闭必须阻止单机自动进入');
+  assert.strictEqual(isAutoEnterEnabled({ features: { autoEnter: true }, desktops: [desktop] }), true);
+  assert.strictEqual(isAutoEnterEnabled({ features: { autoEnter: false }, desktops: [] }), false);
+
+  const clientSource = read('app/ecloud/ecloud_client.js');
+  const serverSource = read('server.js');
+  const uiSource = read('app/static/app.js');
+  assert.ok(/if \(isAutoEnterEnabled\(this\.account\) && !isConnectionBusy\(\)\)/.test(clientSource), '调度必须读取账号总开关');
+  assert.ok(/enableAllEcloudAutoEnter[\s\S]*?originCompanyCode === 'CMSSZTE'[\s\S]*?realEnterEnabled = true/.test(serverSource), '账号级开启须为兼容云电脑开启单机任务');
+  assert.ok(/toggleFeature\('\$\{acc\.id\}', 'autoEnter', this\.checked\)/.test(uiSource), '分层开关区须接入账号级自动进入');
 });
 
 test('行为：分层开关判定必须走权威入口，且语义正确（含"保活类不得被 taskEnabled 污染"）', () => {
@@ -2966,12 +2983,12 @@ test('三平台「当前动作」后的动作文字必须显式 11.5px，不得�
     );
   }
 
-  // 对照项：标签侧三处都仍是 11.5px，防止"把标签也一起改大"来糊弄本断言
+  // 对照项：移动公众正常/降级两支都保留标签，共四处，防止只改动作文字字号。
   const labelHits = appJs.match(
     /<span style="flex-shrink: 0; font-size: 11\.5px; color: #64748b;">当前动作:<\/span>/g
   ) || [];
   assert.ok(
-    labelHits.length === 3,
+    labelHits.length === 4,
     `三平台的「当前动作:」标签都必须保持 11.5px，现匹配到 ${labelHits.length} 处`
   );
 });
@@ -3331,10 +3348,7 @@ test('静态：SSE 的"新增"与"折叠更新"必须共用同一条幂等落盘
 group('组 22 · 移动公众卡片：栏目更名 / instanceId 悬停看全 / 运行状态徽章（诚实三态）');
 
 test('监视板块的主机名必须显式声明 12px（不得继承 16px 浏览器默认）', () => {
-  const cases = [
-    ['移动爱家监视行', 'vmName'],
-    ['移动公众监视行', 'name'],
-  ];
+  const cases = [['移动爱家监视行', 'vmName']];
   for (const [label, expr] of cases) {
     const re = new RegExp(
       `<span style="font-size: 12px; font-weight: 700; color: #0f172a;[^"]*">\\$\\{escapeHtml\\(${expr}\\)\\}</span>`,
@@ -3347,6 +3361,12 @@ test('监视板块的主机名必须显式声明 12px（不得继承 16px 浏览
       '（不给字号就会继承浏览器默认 16px，正是用户看到的"字体偏大"）'
     );
   }
+  // 移动公众改为紧凑卡片，字号由 CSS 类明确指定；两个状态分支都须使用该类。
+  const ecMonitor = extractFunctionFrom(appJs, 'buildEcloudDesktopMonitorHtml');
+  const ecNames = ecMonitor.match(/<div class="ec-mon-name"[^>]*>.*?<strong>\$\{escapeHtml\(name\)\}<\/strong>/g) || [];
+  assert.strictEqual(ecNames.length, 2, '移动公众降级与正常监视卡都必须使用 ec-mon-name');
+  assert.ok(/\.ec-mon-name\s*\{[^}]*font-size:\s*12px/s.test(read('app/static/style.css')),
+    '移动公众主机名必须由 ec-mon-name 明确设为 12px');
   // 反向：不得再出现"没写 font-size 的主机名 span"（就是本次要修的那种写法）
   const raw = appJs.match(
     /<span style="font-weight: 700; color: #0f172a; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">\$\{escapeHtml\((?:vmName|name)\)\}<\/span>/g

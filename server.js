@@ -3215,6 +3215,7 @@ function buildEcloudDefaultFeatures() {
     keepAlive: true,              // 账号级保活总开关（与另两平台同名同义，但账号存储各自独立）
     ecloudL1AccountKeep: true,    // L1 账号态保活
     ecloudL2DesktopReg: true,     // L2 桌面登记保活
+    autoEnter: false,             // 真实进入需用户主动开启，避免新账号自动占用桌面会话
     // 【2026-09-28 用户拍板】平台存在约 48 小时强制关机策略，自动开机守护**默认开启**
     // （拦不住强制关机就自动恢复）；不需要的用户可显式关闭。
     autoBoot: true
@@ -4972,6 +4973,9 @@ function rewardNeedsDesktop(prodId, prodType) {
     }
 
     const body = await parseJsonBody(req);
+    const enableAllEcloudAutoEnter = acc.platform === 'ecloud'
+      && body.features?.autoEnter === true
+      && acc.features?.autoEnter !== true;
     if (body.name) acc.name = body.name;
     if (body.user) acc.user = body.user;
     if (body.password) acc.password = body.password;
@@ -4982,6 +4986,11 @@ function rewardNeedsDesktop(prodId, prodType) {
     if (typeof body.enabled === 'boolean') acc.enabled = body.enabled;
     if (typeof body.bound === 'boolean') acc.bound = body.bound;
     if (body.features) acc.features = { ...acc.features, ...body.features };
+    if (enableAllEcloudAutoEnter) {
+      for (const desktop of (acc.desktops || [])) {
+        if (desktop.originCompanyCode === 'CMSSZTE') desktop.realEnterEnabled = true;
+      }
+    }
     if (body.redeemConfig) acc.redeemConfig = { ...acc.redeemConfig, ...body.redeemConfig };
     if (body.stats) acc.stats = { ...acc.stats, ...body.stats };
 
