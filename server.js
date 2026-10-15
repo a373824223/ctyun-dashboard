@@ -3215,6 +3215,7 @@ function buildEcloudDefaultFeatures() {
     keepAlive: true,              // 账号级保活总开关（与另两平台同名同义，但账号存储各自独立）
     ecloudL1AccountKeep: true,    // L1 账号态保活
     ecloudL2DesktopReg: true,     // L2 桌面登记保活
+    autoEnter: false,             // 真实进入需用户主动开启，避免新账号自动占用桌面会话
     // 【2026-09-28 用户拍板】平台存在约 48 小时强制关机策略，自动开机守护**默认开启**
     // （拦不住强制关机就自动恢复）；不需要的用户可显式关闭。
     autoBoot: true
@@ -4251,7 +4252,8 @@ function rewardNeedsDesktop(prodId, prodType) {
               keepAliveView = client.describeDesktopKeepAlive(d);
             }
           } catch (e) { keepAliveView = null; }
-          return keepAliveView ? { ...d, keepAliveView } : { ...d };
+          const heldConnected = client.getHeldDesktopInstanceId?.() === String(d.instanceId);
+          return keepAliveView ? { ...d, keepAliveView, heldConnected } : { ...d, heldConnected };
         });
         return {
           ...acc,
@@ -4604,7 +4606,9 @@ function rewardNeedsDesktop(prodId, prodType) {
     const code = (body.code || '').trim();
     const entry = pendingEcloudLogins.get(pendingId);
     if (!entry) { jsonResponse(res, { error: '待定登录已过期或不存在，请重新添加账号' }, 400); return; }
-    if (entry.acc.ownerId !== session.userId) { jsonResponse(res, { error: '权限不足：无权操作该账号' }, 403); return; }
+    if (entry.acc.ownerId !== session.userId && !(entry.refreshOnly && canUserAccessAccount(session, entry.acc))) {
+      jsonResponse(res, { error: '权限不足：无权操作该账号' }, 403); return;
+    }
 
     try {
       const r = await entry.client.loginInteractive(entry.branch, code, {
@@ -4613,6 +4617,11 @@ function rewardNeedsDesktop(prodId, prodType) {
       });
       if (r && r.status === 'success') {
         pendingEcloudLogins.delete(pendingId);
+        if (entry.refreshOnly) {
+          appendLog(ECLOUD_LOG_SOURCE, `[${entry.acc.name}] 连接票据已通过短信验证刷新`, 'success', entry.acc.name, 'ecloud');
+          jsonResponse(res, { success: true, refreshed: true });
+          return;
+        }
         const desktops = await entry.client.refreshDesktops().catch(() => []);
         finalizeEcloudAccount(entry.acc, entry.client);
         appendLog(ECLOUD_LOG_SOURCE, `[${entry.acc.name}] 短信验证通过，移动公众账号添加成功（${desktops.length} 台云电脑）`, 'success', entry.acc.name, 'ecloud');
@@ -4665,6 +4674,82 @@ function rewardNeedsDesktop(prodId, prodType) {
       jsonResponse(res, { success: true, result: out, liveMetrics: client.metrics });
     } catch (e) {
       jsonResponse(res, { error: e.message || '移动公众保活执行失败' }, 400);
+    }
+    return;
+  }
+
+  // 已配置账号首次使用桌面组件时，可补领连接票据；短信验证沿用现有登录流程。
+  if (req.method === 'POST' && pathname === '/api/accounts/ecloud/reauth') {
+    const session = getSessionFromReq(req);
+    if (!session) { jsonResponse(res, { error: '未授权' }, 401); return; }
+    const body = await parseJsonBody(req).catch(() => ({}));
+    const acc = appConfig.accounts.find(a => a.id === body.accountId && a.platform === 'ecloud');
+    if (!acc) { jsonResponse(res, { error: '未找到该移动公众账号' }, 404); return; }
+    if (!canUserAccessAccount(session, acc)) { jsonResponse(res, { error: '权限不足' }, 403); return; }
+    try {
+      const client = getClient(acc);
+      const r = await client.loginInteractive(null, '', { preserveOnInteractive: true });
+      const status = r && r.status;
+      if (status === 'success') { jsonResponse(res, { success: true }); return; }
+      if (!INTERACTIVE_BRANCHES.has(status)) {
+        jsonResponse(res, { error: (r && r.error) || `登录未成功（${status || '未知'}）` }, 400);
+        return;
+      }
+      const pendingId = 'refresh_' + crypto.randomUUID();
+      const mobile = (r && r.mobile) || '';
+      registerPendingEcloudLogin(pendingId, { acc, client, branch: status, mobile, refreshOnly: true });
+      let smsSent = false, smsError = '';
+      try { await client.loginSendSms(status, mobile); smsSent = true; }
+      catch (e) { smsError = e.message || String(e); }
+      jsonResponse(res, { needVerification: true, pendingId, branch: status, mobile, smsSent, smsError }, 202);
+    } catch (e) {
+      jsonResponse(res, { error: e.message || '连接票据刷新失败' }, 400);
+    }
+    return;
+  }
+
+  // 用户手动指定一台移动公众云电脑，真实进入后由组件自动断开；绝不操作电源。
+  if (req.method === 'POST' && pathname === '/api/accounts/ecloud/enter-once') {
+    const session = getSessionFromReq(req);
+    if (!session) { jsonResponse(res, { error: '未授权' }, 401); return; }
+    const body = await parseJsonBody(req).catch(() => ({}));
+    const acc = appConfig.accounts.find(a => a.id === body.accountId && a.platform === 'ecloud');
+    if (!acc) { jsonResponse(res, { error: '未找到该移动公众账号' }, 404); return; }
+    if (!canUserAccessAccount(session, acc)) { jsonResponse(res, { error: '权限不足' }, 403); return; }
+    const instanceId = String(body.instanceId || '');
+    if (!instanceId || !(acc.desktops || []).some(d => String(d.instanceId) === instanceId)) {
+      jsonResponse(res, { error: '账号下找不到这台云电脑' }, 400); return;
+    }
+    try {
+      jsonResponse(res, await getClient(acc).enterAndExitDesktop(instanceId));
+    } catch (e) {
+      jsonResponse(res, { error: e.message || '进入后退出失败' }, 400);
+    }
+    return;
+  }
+
+  // 手动进入并保持连接；关闭开关只断开桌面会话，不操作云电脑电源。
+  if (req.method === 'POST' && pathname === '/api/accounts/ecloud/hold') {
+    const session = getSessionFromReq(req);
+    if (!session) { jsonResponse(res, { error: '未授权' }, 401); return; }
+    const body = await parseJsonBody(req).catch(() => ({}));
+    const acc = appConfig.accounts.find(a => a.id === body.accountId && a.platform === 'ecloud');
+    if (!acc) { jsonResponse(res, { error: '未找到该移动公众账号' }, 404); return; }
+    if (!canUserAccessAccount(session, acc)) { jsonResponse(res, { error: '权限不足' }, 403); return; }
+    const instanceId = String(body.instanceId || '');
+    const desktop = (acc.desktops || []).find(d => String(d.instanceId) === instanceId);
+    if (!desktop) { jsonResponse(res, { error: '账号下找不到这台云电脑' }, 400); return; }
+    if (!['connect', 'disconnect'].includes(body.action)) {
+      jsonResponse(res, { error: '操作无效' }, 400); return;
+    }
+    try {
+      const client = getClient(acc);
+      const result = body.action === 'connect'
+        ? await client.enterAndStayDesktop(instanceId)
+        : await client.exitHeldDesktop(instanceId);
+      jsonResponse(res, result);
+    } catch (e) {
+      jsonResponse(res, { error: e.message || '桌面连接操作失败' }, 400);
     }
     return;
   }
@@ -4815,10 +4900,12 @@ function rewardNeedsDesktop(prodId, prodType) {
 
     const body = await parseJsonBody(req);
     const vmKey = String(body.vmId || body.desktopId || body.userServiceId || '');
-    const featureName = body.feature; // 'keepaliveEnabled' | 'autoBootEnabled' | 'taskEnabled' | 'keepaliveInterval'
+    const featureName = body.feature; // 单机开关及周期
     // （数据面保活是账号级 features.dataPlaneKeepalive，在「自动化保活开关」区，不走单机 toggle）
 
-    if (!vmKey || !['keepaliveEnabled', 'autoBootEnabled', 'taskEnabled', 'keepaliveInterval'].includes(featureName)) {
+    const allowedFeatures = ['keepaliveEnabled', 'autoBootEnabled', 'taskEnabled', 'keepaliveInterval'];
+    if (acc.platform === 'ecloud') allowedFeatures.push('realEnterEnabled');
+    if (!vmKey || !allowedFeatures.includes(featureName)) {
       jsonResponse(res, { error: '参数错误：必须提供有效的 vmId 与 feature' }, 400);
       return;
     }
@@ -4884,6 +4971,7 @@ function rewardNeedsDesktop(prodId, prodType) {
     if (featureName === 'keepaliveEnabled') featureCn = '独立保活';
     else if (featureName === 'taskEnabled') featureCn = '自动化任务';
     else if (featureName === 'autoBootEnabled') featureCn = '自动开机';
+    else if (featureName === 'realEnterEnabled') featureCn = '定时进入后退出';
     else if (featureName === 'keepaliveInterval') featureCn = `独立保活周期 (${finalValue ? Math.round(finalValue/60) + '分钟' : '继承账号默认'})`;
 
     appendLog('System', `[${acc.name}] 已将云主机 [${vmKey}] 的【${featureCn}】更新为: ${finalValue ? (typeof finalValue === 'boolean' ? '开启' : finalValue + '秒') : '关闭/继承'}`, 'info');
@@ -4912,6 +5000,9 @@ function rewardNeedsDesktop(prodId, prodType) {
     }
 
     const body = await parseJsonBody(req);
+    const enableAllEcloudAutoEnter = acc.platform === 'ecloud'
+      && body.features?.autoEnter === true
+      && acc.features?.autoEnter !== true;
     if (body.name) acc.name = body.name;
     if (body.user) acc.user = body.user;
     if (body.password) acc.password = body.password;
@@ -4922,6 +5013,11 @@ function rewardNeedsDesktop(prodId, prodType) {
     if (typeof body.enabled === 'boolean') acc.enabled = body.enabled;
     if (typeof body.bound === 'boolean') acc.bound = body.bound;
     if (body.features) acc.features = { ...acc.features, ...body.features };
+    if (enableAllEcloudAutoEnter) {
+      for (const desktop of (acc.desktops || [])) {
+        if (desktop.originCompanyCode === 'CMSSZTE') desktop.realEnterEnabled = true;
+      }
+    }
     if (body.redeemConfig) acc.redeemConfig = { ...acc.redeemConfig, ...body.redeemConfig };
     if (body.stats) acc.stats = { ...acc.stats, ...body.stats };
 

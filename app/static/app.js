@@ -690,6 +690,42 @@ function ecloudViewTone(view) {
 // 诚实性红线不变：L1/L2 只是 HTTP 层探针，探针成功 ≠ 云电脑不会被关机。
 
 // 逐台云电脑"当前动作"整块 HTML（多机各自一行，状态全部来自后端 keepAliveView）
+function getEcloudClientDisplayName(computerName) {
+  const fullName = String(computerName || '').trim();
+  if (!fullName) return '';
+  // 平台返回 DESKTOP-<长随机串>-<创建时间>；客户端显示的 Windows 名称为前 15 字符。
+  const windowsName = fullName.match(/^DESKTOP-[0-9a-f]{7}/i);
+  return windowsName ? windowsName[0].toUpperCase() : fullName;
+}
+
+const ecloudDeviceSearch = new Map();
+function ecloudDeviceSearchText(desktop) {
+  return [desktop.computerName, getEcloudClientDisplayName(desktop.computerName), desktop.machineName]
+    .filter(Boolean).join(' ').toLocaleLowerCase();
+}
+function applyEcloudDeviceFilter(card, value) {
+  const query = String(value || '').trim().toLocaleLowerCase();
+  let visible = 0;
+  const rows = card.querySelectorAll('.ecloud-desktop-grid .vm-device-item');
+  rows.forEach(row => {
+    const match = !query || row.dataset.searchName.includes(query);
+    row.classList.toggle('ecloud-device-hidden', !match);
+    if (match) visible++;
+  });
+  card.querySelectorAll('.ecloud-monitor-grid .ec-mon-row').forEach(row => {
+    row.classList.toggle('ecloud-device-hidden', !!query && !row.dataset.searchName.includes(query));
+  });
+  const count = card.querySelector('.ecloud-search-count');
+  if (count) count.textContent = `显示 ${visible} / ${rows.length} 台`;
+  const empty = card.querySelector('.ecloud-search-empty');
+  if (empty) empty.hidden = !query || visible > 0;
+}
+function filterEcloudDevices(accId, value) {
+  ecloudDeviceSearch.set(accId, value);
+  const card = document.getElementById(`acc-card-${accId}`);
+  if (card) applyEcloudDeviceFilter(card, value);
+}
+
 function buildEcloudDesktopMonitorHtml(acc) {
   const desktops = acc.desktops || acc.liveMetrics?.desktops || [];
   if (!desktops.length) {
@@ -698,7 +734,8 @@ function buildEcloudDesktopMonitorHtml(acc) {
 
   return desktops.map(d => {
     const iid = String(d.instanceId || '');
-    const name = d.machineName || '移动公众云电脑';
+    const name = getEcloudClientDisplayName(d.computerName) || d.machineName || '移动公众云电脑';
+    const nameTitle = d.computerName ? `${d.computerName} · ${d.machineName || '移动公众云电脑'} · ${iid}` : `${name} · ${iid}`;
     const view = d.keepAliveView || null;
     // 【2026-09-24 用户要求】逐台监视行做减法：不再显示「启用徽章」与厂商徽章 CMSSZTE（两枚一并删除）——
     // 这些信息在「名下云主机」列表里已有；本行只保留 圆点 + 名称 + 当前动作。
@@ -706,12 +743,9 @@ function buildEcloudDesktopMonitorHtml(acc) {
     // 视图缺失时降级：只陈述客观事实，绝不臆造"当前动作"
     if (!view) {
       return `
-        <div class="ec-mon-row" style="display: flex; flex-direction: column; gap: 2px; padding: 5px 0; border-top: 1px dashed var(--border);">
-          <div style="display: flex; align-items: baseline; gap: 5px; overflow: hidden; white-space: nowrap; min-width: 0;">
-            <span style="flex-shrink: 0;">🟣</span>
-            <span style="font-size: 12px; font-weight: 700; color: #0f172a; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">${escapeHtml(name)}</span>
-          </div>
-          <div style="font-size: 11.5px; color: #94a3b8; padding-left: 16px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">当前动作: 等待后端状态同步…</div>
+        <div class="ec-mon-row" id="ec-mon-${acc.id}-${escapeHtml(iid)}" data-search-name="${escapeHtml(ecloudDeviceSearchText(d))}">
+          <div class="ec-mon-name" title="${escapeHtml(nameTitle)}"><span>🟣</span><strong>${escapeHtml(name)}</strong><small>${escapeHtml(iid.slice(-8))}</small></div>
+          <div class="ec-mon-action" style="color: #94a3b8;"><span style="flex-shrink: 0; font-size: 11.5px; color: #64748b;">当前动作:</span><span>等待后端状态同步…</span></div>
         </div>
       `;
     }
@@ -747,17 +781,10 @@ function buildEcloudDesktopMonitorHtml(acc) {
     // 【2026-09-25 用户要求·第七轮】主机名同样补上显式 12px —— 理由与移动爱家监视行完全一致：
     // 这些 span 不写字号就会继承浏览器默认 16px，而周围是 11 / 11.5 / 12px，于是看着"字体偏大"。
     return `
-      <div class="ec-mon-row" id="ec-mon-${acc.id}-${escapeHtml(iid)}" style="display: flex; flex-direction: column; gap: 2px; padding: 5px 0; border-top: 1px dashed var(--border);">
-        <div style="display: flex; align-items: baseline; gap: 5px; overflow: hidden; white-space: nowrap; min-width: 0;">
-          <span style="flex-shrink: 0;">${dot}</span>
-          <span style="font-size: 12px; font-weight: 700; color: #0f172a; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">${escapeHtml(name)}</span>
-        </div>
-        <div style="display: flex; align-items: baseline; gap: 4px; overflow: hidden; white-space: nowrap; min-width: 0; padding-left: 16px;">
-          <span style="flex-shrink: 0; font-size: 11.5px; color: #64748b;">当前动作:</span>
-          <span title="${escapeHtml(actionText)}" style="font-size: 11.5px; color: ${toneColor}; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">${escapeHtml(actionText)}</span>
-        </div>
-        <div title="${escapeHtml(lastTextFull)}" style="font-size: 11.5px; color: #475569; padding-left: 16px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">${lastText}${view.uptime ? ` · 在线时长: <b>${escapeHtml(String(view.uptime))}</b>` : ''}</div>
-        <div title="instanceId: ${escapeHtml(iid)}" style="font-size: 11px; color: #94a3b8; padding-left: 16px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">instanceId: ${escapeHtml(iid)}</div>
+      <div class="ec-mon-row" id="ec-mon-${acc.id}-${escapeHtml(iid)}" data-search-name="${escapeHtml(ecloudDeviceSearchText(d))}">
+        <div class="ec-mon-name" title="${escapeHtml(nameTitle)}"><span>${dot}</span><strong>${escapeHtml(name)}</strong><small>${escapeHtml(iid.slice(-8))}</small></div>
+        <div class="ec-mon-action"><span style="flex-shrink: 0; font-size: 11.5px; color: #64748b;">当前动作:</span><span title="${escapeHtml(actionText)}" style="font-size: 11.5px; color: ${toneColor};">${escapeHtml(actionText)}</span></div>
+        <div class="ec-mon-meta" title="${escapeHtml(lastTextFull)}">${lastText}${view.uptime ? ` · 在线时长: <b>${escapeHtml(String(view.uptime))}</b>` : ''}</div>
       </div>
     `;
   }).join('');
@@ -767,6 +794,7 @@ function buildEcloudDesktopMonitorHtml(acc) {
 function buildAccountCardElement(acc, slotIndex) {
   const card = document.createElement("div");
   card.className = "account-card";
+  if (acc.platform === 'ecloud') card.classList.add('account-card--ecloud');
   card.id = `acc-card-${acc.id}`;
   card.dataset.accId = acc.id;
   card.dataset.slot = slotIndex;
@@ -802,6 +830,8 @@ function buildAccountCardElement(acc, slotIndex) {
     const desktopsCountText = desktops.length > 0 ? `名下云主机 (${desktops.length}台)` : '云主机';
 
     const isGlobalKeepAliveOff = f.keepAlive === false;
+    const isAutoEnterEnabled = f.autoEnter === true ||
+      (f.autoEnter === undefined && desktops.some(d => d.realEnterEnabled === true));
 
     let ecMultiStatusBadge = '';
     if (isGlobalKeepAliveOff) {
@@ -826,12 +856,12 @@ function buildAccountCardElement(acc, slotIndex) {
     let desktopsHtml = '';
     if (desktops.length > 0) {
       desktopsHtml = `
-        <div style="background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 8px; padding: 10px 12px;">
+        <div class="ecloud-desktops-panel">
           <div style="font-size: 12px; font-weight: 700; color: #334155; margin-bottom: 6px; display: flex; justify-content: space-between;">
-            <span>🖥️ ${desktopsCountText}</span>
+            <span>🖥️ ${desktopsCountText}${desktops.length > 9 ? ' <small style="font-weight: 400; color: #64748b;">· 区域内滚动查看更多</small>' : ''}</span>
             <span id="acc-multi-status-${acc.id}">${ecMultiStatusBadge}</span>
           </div>
-          <div style="display: flex; flex-direction: column; gap: 6px;">
+          <div class="ecloud-desktop-grid ${desktops.length > 9 ? 'ecloud-list-scroll' : ''}">
             ${desktops.map(d => {
               const iid = String(d.instanceId || '');
               const isKeepaliveOn = d.keepaliveEnabled !== false;
@@ -852,6 +882,14 @@ function buildAccountCardElement(acc, slotIndex) {
 
               // instanceId 很长（CCA-<32hex>）且整行会被 ellipsis 截断 ⇒ 悬停用 title 给出完整文本
               const iidLineText = `instanceId: ${iid || '—'}`;
+              const clientDisplayName = getEcloudClientDisplayName(d.computerName);
+              const desktopDisplayName = clientDisplayName || d.machineName || '移动公众云电脑';
+              const desktopNameTitle = d.computerName
+                ? `客户端: ${d.computerName} · 云电脑: ${d.machineName || '移动公众云电脑'}`
+                : desktopDisplayName;
+              const lastRealEnterText = d.lastRealEnterAt
+                ? `上次真实进入：${new Date(d.lastRealEnterAt).toLocaleString('zh-CN')}`
+                : '尚未真实进入';
 
               let keepClass = isKeepaliveOn ? 'pill-on-keepalive' : 'pill-off-keepalive';
               let keepText = isKeepaliveOn ? '开' : '关';
@@ -861,11 +899,11 @@ function buildAccountCardElement(acc, slotIndex) {
               }
 
               return `
-                <div class="vm-device-item" id="ec-item-${acc.id}-${escapeHtml(iid)}">
+                <div class="vm-device-item" id="ec-item-${acc.id}-${escapeHtml(iid)}" data-search-name="${escapeHtml(ecloudDeviceSearchText(d))}">
                   <div class="vm-device-header">
                     <div style="display: flex; flex-direction: column; min-width: 0; flex: 1;">
                       <div style="display: flex; align-items: center; gap: 6px; overflow: hidden; white-space: nowrap;">
-                        <span style="font-size: 12px; color: #0f172a; font-weight: 700; text-overflow: ellipsis; overflow: hidden; white-space: nowrap;">${escapeHtml(d.machineName || '移动公众云电脑')}</span>
+                        <span title="${escapeHtml(desktopNameTitle)}" style="font-size: 12px; color: #0f172a; font-weight: 700; text-overflow: ellipsis; overflow: hidden; white-space: nowrap;">${escapeHtml(desktopDisplayName)}</span>
                         ${d.originCompanyCode ? `<span class="badge" style="background:#f0fdf4;color:#166534;border:1px solid #bbf7d0;font-size:9.5px;padding:0 5px;line-height:1.3;">${escapeHtml(d.originCompanyCode)}</span>` : ''}
                       </div>
                       <!-- instanceId 过长：整行省略号截断，鼠标悬停显示完整 ID -->
@@ -892,7 +930,13 @@ function buildAccountCardElement(acc, slotIndex) {
                            常驻可点（能力可见）；平台认为机器在运行时点击会得到平台原话的如实拒绝
                            （"当前状态为已开机，不允许进行如下操作:开机"），不会产生任何副作用。 -->
                       <button type="button" class="pill-toggle-btn pill-action-boot" id="pill-boot-${acc.id}-${escapeHtml(iid)}" onclick="bootEcloudDesktop('${acc.id}', '${escapeHtml(iid)}', '${escapeHtml(d.machineName || '')}')" title="${escapeHtml((view && view.powerOnHint) ? `平台开机操作提示：${view.powerOnHint}` : '通过平台官方 operate 通道开机（真机验证可受理；受理后约数十秒进入运行中）')}">🖥️ 开机</button>
+                      ${d.originCompanyCode === 'CMSSZTE' ? `
+                        <button type="button" class="pill-toggle-btn" id="pill-enter-${acc.id}-${escapeHtml(iid)}" onclick="enterEcloudDesktopOnce('${acc.id}', '${escapeHtml(iid)}', '${escapeHtml(d.machineName || '')}')" title="使用本机移动云电脑组件真实进入；连接成功约 10 秒后自动断开，不关机">🚪 进入后退出</button>
+                        <button type="button" class="pill-toggle-btn ${d.heldConnected ? 'pill-on-keepalive' : 'pill-off-keepalive'}" id="pill-hold-${acc.id}-${escapeHtml(iid)}" onclick="toggleEcloudHeldDesktop('${acc.id}', '${escapeHtml(iid)}', '${escapeHtml(d.machineName || '')}')" title="手动进入并保持连接；再次点击只断开连接，不关闭云电脑">🚪保持进入: ${d.heldConnected ? '开' : '关'}</button>
+                        <button type="button" class="pill-toggle-btn ${d.realEnterEnabled === true ? (isAutoEnterEnabled ? 'pill-on-keepalive' : 'pill-paused') : 'pill-off-keepalive'}" id="pill-real-enter-${acc.id}-${escapeHtml(iid)}" onclick="toggleVmFeature('${acc.id}', '${escapeHtml(iid)}', 'realEnterEnabled', ${d.realEnterEnabled !== true})" title="单机自动进入需账号级「自动进入」同时开启；约每 20 小时真实进入一次，连接成功后自动断开，不关机">🕒自动进入: ${d.realEnterEnabled === true ? (isAutoEnterEnabled ? '开' : '待命(总关)') : '关'}</button>
+                      ` : ''}
                     </div>
+                    <div style="font-size: 10px; color: #64748b; padding-top: 4px;">${escapeHtml(lastRealEnterText)}</div>
                   </div>
                 </div>
               `;
@@ -932,6 +976,13 @@ function buildAccountCardElement(acc, slotIndex) {
         </div>
       </div>
 
+      <div class="ecloud-search-bar">
+        <label for="ecloud-search-${acc.id}">🔎 搜索设备</label>
+        <input id="ecloud-search-${acc.id}" type="search" placeholder="输入客户端名称或云电脑名称" value="${escapeHtml(ecloudDeviceSearch.get(acc.id) || '')}" oninput="filterEcloudDevices('${acc.id}', this.value)" autocomplete="off">
+        <span class="ecloud-search-count"></span>
+      </div>
+      <div class="ecloud-search-empty" hidden>没有匹配的设备</div>
+
       <!-- 🖥️ 名下云主机列表 -->
       ${desktopsHtml}
 
@@ -942,13 +993,13 @@ function buildAccountCardElement(acc, slotIndex) {
            平台名 + 板块名，与移动爱家标题风格对齐（旧后缀原文见 git 历史与测试注释，此处不复述，
            否则会撞到"后缀必须删除"的反向断言）。删的只是**标题后缀文字**，
            "分层明细走日志流"这条事实与实现完全不变。 -->
-      <details class="features-box" ${isDetailsOpen(acc.id, 'ec-monitor') ? 'open' : ''} ontoggle="saveDetailsState('${acc.id}', 'ec-monitor', this.open)">
+      <details class="features-box ecloud-monitor-panel" ${isDetailsOpen(acc.id, 'ec-monitor') ? 'open' : ''} ontoggle="saveDetailsState('${acc.id}', 'ec-monitor', this.open)">
         <summary style="display: flex; justify-content: space-between; align-items: center; cursor: pointer; font-size: 12.5px; font-weight: 700; color: #334155; user-select: none; gap: 6px;">
           <span style="color: #0369a1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">📡 移动公众 保活监视</span>
           <span style="font-size: 11px; color: var(--text-muted); font-weight: normal; flex-shrink: 0; white-space: nowrap;">点击收起/展开</span>
         </summary>
-        <div style="color: #475569; line-height: 1.7; display: flex; flex-direction: column; gap: 3px;">
-          <div id="acc-ec-mon-actions-${acc.id}" style="display: flex; flex-direction: column;">
+        <div style="color: #475569; line-height: 1.7; display: flex; flex-direction: column; gap: 8px;">
+          <div id="acc-ec-mon-actions-${acc.id}" class="ecloud-monitor-grid ${desktops.length > 9 ? 'ecloud-list-scroll' : ''}">
             ${buildEcloudDesktopMonitorHtml(acc)}
           </div>
           <div id="acc-active-info-${acc.id}" style="font-size: 11.5px; color: var(--text-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">账号汇总: <b style="color: #0f172a;">${escapeHtml(m.lastHeartbeatResult || '保活巡检待命')}</b> · 周期: <b>${buildIntervalOverviewText(acc)}</b></div>
@@ -999,6 +1050,13 @@ function buildAccountCardElement(acc, slotIndex) {
               <span class="slider"></span>
             </label>
           </div>
+          <div class="feature-row">
+            <span title="开启后为名下支持进入的云电脑启用单机自动进入；约每 20 小时依次真实进入，连接成功后自动退出，不关机。可在上方逐台关闭。仅在本机面板运行且账号保活开启时执行。">🚪 自动进入</span>
+            <label class="switch">
+              <input type="checkbox" id="auto-enter-${acc.id}" ${isAutoEnterEnabled ? 'checked' : ''} onchange="toggleFeature('${acc.id}', 'autoEnter', this.checked)">
+              <span class="slider"></span>
+            </label>
+          </div>
         </div>
       </details>
 
@@ -1011,6 +1069,7 @@ function buildAccountCardElement(acc, slotIndex) {
         </div>
       </div>
     `;
+    applyEcloudDeviceFilter(card, ecloudDeviceSearch.get(acc.id) || '');
 
     return card;
   }
@@ -1568,9 +1627,15 @@ function updateAccountsInPlace(filteredAccounts) {
     if (isEcloud) {
       const ecMonEl = document.getElementById(`acc-ec-mon-actions-${acc.id}`);
       if (ecMonEl) ecMonEl.innerHTML = buildEcloudDesktopMonitorHtml(acc);
+      applyEcloudDeviceFilter(card, ecloudDeviceSearch.get(acc.id) || '');
       // 【2026-09-28】逐台同步「🛡️守护」胶囊（按元素存在性过滤，绝不留无元素可写的幽灵控件）
       for (const d of (acc.desktops || [])) {
         const iid2 = String(d.instanceId || '');
+        const pHold = document.getElementById(`pill-hold-${acc.id}-${iid2}`);
+        if (pHold && !pHold.disabled) {
+          pHold.className = `pill-toggle-btn ${d.heldConnected ? 'pill-on-keepalive' : 'pill-off-keepalive'}`;
+          pHold.innerText = `🚪保持进入: ${d.heldConnected ? '开' : '关'}`;
+        }
         const pAuto = document.getElementById(`pill-autoboot-${acc.id}-${iid2}`);
         if (!pAuto) continue;
         const on = d.autoBootEnabled !== false;
@@ -1813,6 +1878,8 @@ function renderAccounts(isSilent = false) {
 
   // 根据当前视图过滤账号
   const filteredAccounts = getFilteredAccounts();
+  container.classList.toggle('accounts-grid--ecloud-only',
+    filteredAccounts.length > 0 && filteredAccounts.every(acc => acc.platform === 'ecloud'));
 
   if (!filteredAccounts || filteredAccounts.length === 0) {
     const tabNameMap = { ydpc: '移动爱家', ctyun: '天翼云电脑', ecloud: '移动公众' };
@@ -2102,6 +2169,7 @@ async function toggleFeature(accId, featureKey, checked) {
   const acc = accounts.find(a => a.id === accId);
   if (!acc) return;
   acc.features = acc.features || {};
+  const previousValue = acc.features[featureKey];
   acc.features[featureKey] = checked;
 
   // 立即刷新卡片视图以联动反映单机与全局层叠状态
@@ -2114,16 +2182,23 @@ async function toggleFeature(accId, featureKey, checked) {
       body: JSON.stringify({ features: acc.features })
     });
     if (res.ok) {
+      if (acc.platform === 'ecloud' && featureKey === 'autoEnter') {
+        const updated = await res.json();
+        acc.desktops = updated.desktops || acc.desktops;
+        renderAccounts();
+      }
       showToast(`已${checked ? '开启' : '关闭'}该功能`, "success");
     } else {
       showToast("更新失败", "error");
       // 更新失败则还原界面的复选状态
-      acc.features[featureKey] = !checked;
+      if (previousValue === undefined) delete acc.features[featureKey];
+      else acc.features[featureKey] = previousValue;
       renderAccounts();
     }
   } catch (e) {
     showToast("网络请求异常: " + e.message, "error");
-    acc.features[featureKey] = !checked;
+    if (previousValue === undefined) delete acc.features[featureKey];
+    else acc.features[featureKey] = previousValue;
     renderAccounts();
   }
 }
@@ -2133,7 +2208,7 @@ async function toggleVmFeature(accId, vmKey, featureName, nextVal) {
   // 【2026-09-23 修订】移动云"自动开机守护"开关已恢复放行，开机走 CAG HTTPS 干净通道
   // （账号自有 firm-auth 凭据 + RSA 公钥动态获取 + 保留 TLS 证书校验）。
   // 伪造身份 / 硬编码第三方凭据 / 关证书 等红线仍被回归组 7 机械拦截。
-  // 支持的单机开关：keepaliveEnabled / taskEnabled / autoBootEnabled / keepaliveInterval
+  // 支持的单机开关：keepaliveEnabled / taskEnabled / autoBootEnabled / realEnterEnabled / keepaliveInterval
 
   const acc = accounts.find(a => a.id === accId);
   if (!acc) return;
@@ -2176,19 +2251,28 @@ async function toggleVmFeature(accId, vmKey, featureName, nextVal) {
     onClass = 'pill-on-keepalive';
     offClass = 'pill-off-keepalive';
     labelPrefix = '🛡️守护: ';
+  } else if (featureName === 'realEnterEnabled') {
+    prefixKey = 'pill-real-enter-';
+    onClass = 'pill-on-keepalive';
+    offClass = 'pill-off-keepalive';
+    labelPrefix = '🕒自动进入: ';
   }
 
   const pillBtn = prefixKey ? document.getElementById(prefixKey + accId + '-' + vmKey) : null;
   if (pillBtn) {
+    const pausedByAccount = isEcloud && featureName === 'realEnterEnabled'
+      && nextVal && acc.features?.autoEnter === false;
     pillBtn.classList.remove(onClass, offClass);
-    pillBtn.classList.add(nextVal ? onClass : offClass);
-    pillBtn.innerText = labelPrefix + (nextVal ? '开' : '关');
+    pillBtn.classList.remove('pill-paused');
+    pillBtn.classList.add(pausedByAccount ? 'pill-paused' : (nextVal ? onClass : offClass));
+    pillBtn.innerText = labelPrefix + (pausedByAccount ? '待命(总关)' : (nextVal ? '开' : '关'));
     pillBtn.onclick = () => toggleVmFeature(accId, vmKey, featureName, !nextVal);
   }
 
   const featureCn = featureName === 'keepaliveEnabled' ? '单机独立保活'
     : featureName === 'taskEnabled' ? '单机自动化任务'
     : featureName === 'autoBootEnabled' ? '单机自动开机守护'
+    : featureName === 'realEnterEnabled' ? '定时进入后退出'
     : featureName;
   try {
     const res = await authFetch(`/api/accounts/${accId}/vm-feature`, {
@@ -2197,6 +2281,10 @@ async function toggleVmFeature(accId, vmKey, featureName, nextVal) {
       body: JSON.stringify({ vmId: vmKey, desktopId: vmKey, feature: featureName, value: nextVal })
     });
     if (res.ok) {
+      if (isEcloud && featureName === 'realEnterEnabled' && acc.features?.autoEnter === undefined) {
+        const master = document.getElementById(`auto-enter-${acc.id}`);
+        if (master) master.checked = acc.desktops.some(d => d.realEnterEnabled === true);
+      }
       showToast(`已${nextVal ? '开启' : '关闭'}${featureCn}`, "success");
     } else {
       const data = await res.json();
@@ -2998,6 +3086,83 @@ async function bootEcloudDesktop(accId, instanceId, vmName = '') {
     showToast("开机请求异常: " + e.message, "error");
   }
   await loadAccounts(true);
+}
+
+async function requestEcloudDesktopWithReauth(path, accId, instanceId, extra = {}) {
+    const payload = { accountId: accId, instanceId, ...extra };
+    let res = await authFetch(path, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    });
+    let data = await res.json().catch(() => ({}));
+    if (!res.ok && /缺少连接票据|登录令牌已失效|需要短信验证/.test(String(data.error || ''))) {
+      showToast('正在重新验证移动公众账号', 'info');
+      const loginRes = await authFetch('/api/accounts/ecloud/reauth', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ accountId: accId })
+      });
+      const loginData = await loginRes.json().catch(() => ({}));
+      if (loginData.needVerification) {
+        if (!loginData.smsSent) throw new Error(loginData.smsError || '验证码下发失败');
+        const code = window.prompt(`验证码已发送至 ${loginData.mobile || '绑定手机'}。请输入短信验证码：`);
+        if (!code || !code.trim()) throw new Error('已取消短信验证，本次未进入云电脑');
+        const verifyRes = await authFetch('/api/accounts/ecloud/login', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ pendingId: loginData.pendingId, code: code.trim(), mobile: loginData.mobile })
+        });
+        const verifyData = await verifyRes.json().catch(() => ({}));
+        if (!verifyRes.ok || !verifyData.success) throw new Error(verifyData.error || '短信验证失败');
+      } else if (!loginRes.ok || !loginData.success) {
+        throw new Error(loginData.error || '连接票据刷新失败');
+      }
+      res = await authFetch(path, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+      data = await res.json().catch(() => ({}));
+    }
+    return { res, data };
+}
+
+async function enterEcloudDesktopOnce(accId, instanceId, vmName = '') {
+  const label = vmName ? `「${vmName}」` : '该云电脑';
+  const button = document.getElementById(`pill-enter-${accId}-${instanceId}`);
+  if (button) { button.disabled = true; button.innerText = '连接中…'; }
+  showToast(`正在进入 ${label}，连接成功约 10 秒后自动退出`, 'info');
+  try {
+    const { res, data } = await requestEcloudDesktopWithReauth('/api/accounts/ecloud/enter-once', accId, instanceId);
+    if (res.ok && data.success) showToast(data.message, 'success');
+    else showToast(data.error || `进入失败（HTTP ${res.status}）`, 'error');
+  } catch (e) {
+    showToast(`进入请求失败：${e.message}`, 'error');
+  } finally {
+    if (button) { button.disabled = false; button.innerText = '🚪 进入后退出'; }
+    await loadAccounts(true);
+  }
+}
+
+async function toggleEcloudHeldDesktop(accId, instanceId, vmName = '') {
+  const label = vmName ? `「${vmName}」` : '该云电脑';
+  const acc = accounts.find(a => a.id === accId);
+  const desktop = (acc?.desktops || []).find(d => String(d.instanceId) === String(instanceId));
+  const action = desktop?.heldConnected ? 'disconnect' : 'connect';
+  const button = document.getElementById(`pill-hold-${accId}-${instanceId}`);
+  if (button) { button.disabled = true; button.innerText = action === 'connect' ? '连接中…' : '断开中…'; }
+  showToast(action === 'connect' ? `正在进入 ${label}，成功后将保持连接` : `正在退出 ${label} 的连接`, 'info');
+  try {
+    const { res, data } = await requestEcloudDesktopWithReauth('/api/accounts/ecloud/hold', accId, instanceId, { action });
+    if (res.ok && data.success) showToast(data.message, 'success');
+    else showToast(data.error || `连接操作失败（HTTP ${res.status}）`, 'error');
+  } catch (e) {
+    showToast(`连接操作失败：${e.message}`, 'error');
+  } finally {
+    if (button) button.disabled = false;
+    await loadAccounts(true);
+  }
 }
 
 // 【2026-09-26】"机器没开机 ⇒ 本次压根没执行"必须与真失败分开渲染。

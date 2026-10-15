@@ -25,6 +25,7 @@ const FILES = [
   'app/ydpc/scg_keepalive.js',
   'app/ecloud/ecloud_engine.js',
   'app/ecloud/ecloud_client.js',
+  'app/ecloud/cmss_connect.js',
   'app/static/app.js',
 ];
 
@@ -39,6 +40,7 @@ const REQUIRED = [
   'app/ydpc/scg_keepalive.js',
   'app/ecloud/ecloud_engine.js',
   'app/ecloud/ecloud_client.js',
+  'app/ecloud/cmss_connect.js',
 ];
 for (const f of REQUIRED) {
   if (!FILES.includes(f)) {

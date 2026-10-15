@@ -185,6 +185,7 @@ class Endpoint:
 
     # 用户/设备
     USER_GET_INFO             = "/user/getLoginUserInfo"
+    RECORD_DEVICE_INFO        = "/login/recordDeviceInfo"
     GET_SYS_CONFIG            = "/client/getSysConfig"
     USER_GET_DEVICE_INFO      = "/user/getDeviceInfo"
     GET_SYS_TIME              = "/user/getSysTime"

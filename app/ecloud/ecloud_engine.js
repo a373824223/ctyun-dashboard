@@ -190,7 +190,8 @@ class EcloudEngine extends (require('events').EventEmitter) {
       const child = spawn(this._spawnTarget.path, [...this._spawnTarget.args, SIDECAR], {
         cwd: ENGINE_DIR,
         stdio: ['pipe', 'pipe', 'pipe'],
-        env: { ...process.env, ...this.extraEnv },
+        // Windows 管道默认可能使用 GBK；协议两端统一为 UTF-8，避免中文名称和日志乱码。
+        env: { ...process.env, ...this.extraEnv, PYTHONIOENCODING: 'utf-8' },
       });
       this._proc = child;
 
@@ -338,6 +339,8 @@ class EcloudEngine extends (require('events').EventEmitter) {
   desktopList(sessionId) { return this.request('desktop.list', {}, sessionId); }
   /** 桌面电源操作（available=开机 / shutdown=关机 / restart=restart）。用户显式触发。 */
   desktopPower(sessionId, p) { return this.request('desktop.power', p, sessionId); }
+  desktopConnectInfo(sessionId, p) { return this.request('desktop.connectInfo', p, sessionId); }
+  desktopReportConnect(sessionId, p) { return this.request('desktop.reportConnect', p, sessionId); }
   keepaliveL1(sessionId) { return this.request('keepalive.l1', {}, sessionId); }
   keepaliveL2(sessionId, p) { return this.request('keepalive.l2', p, sessionId); }
   logout(sessionId) { return this.request('logout', {}, sessionId); }

@@ -113,7 +113,7 @@ _SESSIONS: dict[str, dict] = {}
 # 触发风控 → 手机短信轰炸。默认 20 分钟，可用环境变量收紧/放宽。
 _RELOGIN_COOLDOWN_SEC = max(60, int(os.environ.get("ECLOUD_RELOGIN_COOLDOWN_SEC") or 1200))
 
-# 会话落盘文件：**只存 token / deviceUid 等非敏感字段，绝不写密码**。
+# 会话落盘文件含 token / 连接票据，属于敏感本机文件，已被 Git 忽略；绝不写密码。
 # 目的是 Node 主进程重启（或侧车被拉起重启）后不必重新走一次密码登录。
 _SESSION_FILE = Path(os.environ.get(
     "ECLOUD_SESSION_FILE",
@@ -139,7 +139,7 @@ def _new_http(device_uid: str) -> "EcloudHttpUtil":
 
 
 # --------------------------------------------------------------------------
-# 会话落盘（免重复登录）—— 只写非敏感字段
+# 会话落盘（免重复登录）—— 只写必要会话材料，文件不得进入仓库
 # --------------------------------------------------------------------------
 def _persist_sessions() -> None:
     try:
@@ -152,7 +152,10 @@ def _persist_sessions() -> None:
                 "deviceUid": s.get("deviceUid") or "",
                 "mobile": s.get("mobile") or "",
                 "accessToken": s.get("accessToken") or "",
+                "accessTicket": s.get("accessTicket") or "",
                 "savedAt": int(time.time()),
+                # 会话文件可能因其它账号登录而重写；令牌签发时间不能跟着刷新。
+                "tokenIssuedAt": int(s.get("tokenIssuedAt") or time.time()),
             }
         _SESSION_FILE.parent.mkdir(parents=True, exist_ok=True)
         tmp = _SESSION_FILE.with_suffix(".tmp")
@@ -228,8 +231,14 @@ def op_login_begin(params: dict) -> dict:
         "deviceUid": device_uid, "mobile": r.get("mobile") or "",
         "loginCode": r.get("login_code"), "status": status,
         "accessToken": http.access_token, "updatedAt": time.time(),
+        "accessTicket": r.get("access_ticket") or "",
+        "tokenIssuedAt": time.time() if status == login_mod.LoginResult.SUCCESS else 0,
     }
-    _SESSIONS[sid] = sess
+    if params.get("preserveOnInteractive") and status != login_mod.LoginResult.SUCCESS and sid in _SESSIONS:
+        # 补领连接票据可能需要短信；旧 token 继续供周期保活使用。
+        _SESSIONS[sid]["pendingAuth"] = sess
+    else:
+        _SESSIONS[sid] = sess
     if status == login_mod.LoginResult.SUCCESS:
         _persist_sessions()
     _emit_log("info", f"登录分支: {status}")
@@ -256,7 +265,8 @@ def op_login_sms(params: dict) -> dict:
     sid = params.get("sessionId") or ""
     branch = (params.get("branch") or "").strip()
     code = params.get("code") or ""
-    s = _session(sid)
+    existing = _session(sid)
+    s = existing.get("pendingAuth") or existing
     http: "EcloudHttpUtil" = s["http"]
     mobile = params.get("mobile") or s.get("mobile") or ""
     username = s.get("username") or ""
@@ -286,7 +296,10 @@ def op_login_sms(params: dict) -> dict:
 
     if r.get("status") == login_mod.LoginResult.SUCCESS:
         s["accessToken"] = http.access_token
+        s["accessTicket"] = r.get("access_ticket") or ""
         s["status"] = r.get("status")
+        s["tokenIssuedAt"] = time.time()
+        _SESSIONS[sid] = s
         _persist_sessions()
     s["updatedAt"] = time.time()
     return {
@@ -321,11 +334,14 @@ def op_session_restore(params: dict) -> dict:
         "loginCode": None,
         "status": "restored",
         "accessToken": saved["accessToken"],
+        "accessTicket": saved.get("accessTicket") or "",
+        "tokenIssuedAt": saved.get("tokenIssuedAt") or saved.get("savedAt") or 0,
         "updatedAt": time.time(),
         "restoredAt": time.time(),
     }
     _emit_log("info", "已从本地保存的 token 恢复会话（免重复登录）")
-    return {"restored": True, "accessToken": saved["accessToken"]}
+    return {"restored": True, "accessToken": saved["accessToken"],
+            "tokenIssuedAt": saved.get("tokenIssuedAt") or saved.get("savedAt") or 0}
 
 
 def op_session_relogin(params: dict) -> dict:
@@ -358,7 +374,9 @@ def op_session_relogin(params: dict) -> dict:
         s.update({
             "http": http, "username": username, "password": password,
             "deviceUid": device_uid, "accessToken": http.access_token,
+            "accessTicket": r.get("access_ticket") or "",
             "status": status, "updatedAt": time.time(),
+            "tokenIssuedAt": time.time(),
         })
         _persist_sessions()
         # quiet=true：调用方（如周期主动续期）自行落一条更准确的日志，避免"重登成功"误导排查
@@ -401,7 +419,8 @@ def op_login_send_sms(params: dict) -> dict:
     _require_ready()
     sid = params.get("sessionId") or ""
     branch = (params.get("branch") or "").strip()
-    s = _session(sid)
+    existing = _session(sid)
+    s = existing.get("pendingAuth") or existing
     http: "EcloudHttpUtil" = s["http"]
     mobile = (params.get("mobile") or s.get("mobile") or "").strip()
     username = s.get("username") or ""
@@ -464,6 +483,7 @@ def op_desktop_list(params: dict) -> dict:
             "instanceId": d.instance_id,
             "machineId": d.machine_id,
             "machineName": d.machine_name,
+            "computerName": d.computer_name,
             "originCompanyCode": d.origin_company_code,
             "resourcePoolUid": d.resource_pool_uid,
             # 服务端原始值（界面 title 里展示，便于排查对不上的新枚举）
@@ -512,6 +532,89 @@ def op_desktop_power(params: dict) -> dict:
         "operate": operate,
         "message": f"已下发{cn}指令，平台已受理（状态落地需数秒到数十秒，稍后自动刷新）",
     }
+
+
+def op_desktop_connect_info(params: dict) -> dict:
+    """取官方桌面组件的连接参数；绝不把这些敏感字段返回给浏览器。"""
+    _require_ready()
+    s = _session(params.get("sessionId") or "")
+    if not s.get("accessTicket"):
+        raise ValueError("当前会话缺少连接票据，请在面板重新登录该移动公众账号并完成短信验证")
+    instance_id = str(params.get("instanceId") or "")
+    if not instance_id:
+        raise ValueError("缺少云电脑 instanceId")
+    body = s["http"].post(_config.Endpoint.GET_DEVICE_INFO, {
+        "companyCode": _config.COMPANY_CODE, "allCompany": True, "version": "1.0.0",
+    })
+    machines = body.get("machineList") if isinstance(body, dict) else []
+    machine = next((m for m in machines or [] if str(m.get("instanceId") or "") == instance_id), None)
+    if not machine:
+        raise ValueError("账号下找不到这台云电脑，请先同步桌面列表")
+    if str(machine.get("originCompanyCode") or "") != "CMSSZTE":
+        raise ValueError("当前仅支持 CMSSZTE 桌面组件")
+    if desktop_list_mod.normalize_power_state(machine.get("resourceStatus")) != "on":
+        raise ValueError("云电脑未处于运行中，未发起进入")
+    user_body = login_mod.get_user_info(s["http"])
+    users = user_body.get("userInfoList") if isinstance(user_body, dict) else []
+    user = (users or [{}])[0]
+    login_uid = s.setdefault("loginUid", str(uuid.uuid4()))
+    if not s.get("loginRecorded"):
+        # 官方客户端在连接前登记本机登录标识；machineConnect 依赖此记录。
+        try:
+            s["http"].post(_config.Endpoint.RECORD_DEVICE_INFO, {
+                "clientLoginUid": login_uid,
+            })
+        except Exception as exc:
+            # 平台错误中可能带票据和桌面口令，不能原样返回面板。
+            raise RuntimeError(f"登记本机登录信息失败（{type(exc).__name__}）") from None
+        s["loginRecorded"] = True
+    return {
+        "machineId": str(machine.get("machineId") or ""),
+        "machineName": str(machine.get("machineName") or ""),
+        "instanceId": instance_id,
+        "adUser": machine.get("adUser") or "",
+        "adPassword": machine.get("adPassword") or "",
+        "customParams": machine.get("customParams") or {},
+        "customLoginParams": machine.get("customLoginParams") or {},
+        "customPrivateLoginParams": machine.get("customPrivateLoginParams"),
+        "resourceStatus": machine.get("resourceStatus") or "",
+        "accessTicket": s["accessTicket"],
+        "deviceUid": s.get("deviceUid") or "",
+        "userInfo": {
+            "userPhoneNumber": user.get("mobile") or s.get("mobile") or "",
+            "userName": user.get("userName") or s.get("username") or "",
+            "adClientId": user.get("adConnectorId") or "",
+        },
+        "loginUid": login_uid,
+        "connectId": str(uuid.uuid4()),
+    }
+
+
+def op_desktop_report_connect(params: dict) -> dict:
+    """仅在组件上报连接成功后调用官方会话登记接口。"""
+    _require_ready()
+    s = _session(params.get("sessionId") or "")
+    ticket = s.get("accessTicket") or ""
+    if not ticket:
+        raise ValueError("连接票据已失效")
+    machine_id = str(params.get("machineId") or "")
+    connect_id = str(params.get("connectId") or "")
+    if not machine_id or not connect_id:
+        raise ValueError("缺少连接标识")
+    try:
+        body = s["http"].post(_config.Endpoint.SESSION_MACHINE_CONNECT, {
+            "ticket": ticket,
+            "machineId": machine_id,
+            "machineName": str(params.get("machineName") or ""),
+            "status": "success", "flag": True,
+            "errorCode": "", "errorMsg": "",
+            "clientConnectId": connect_id,
+            "clientLoginUid": s.setdefault("loginUid", str(uuid.uuid4())),
+            "sessionId": connect_id,
+        })
+    except Exception as exc:
+        raise RuntimeError(f"平台会话登记失败（{type(exc).__name__}）") from None
+    return {"ok": True, "connectId": body.get("connectId") if isinstance(body, dict) else ""}
 
 
 def op_keepalive_l1(params: dict) -> dict:
@@ -571,6 +674,8 @@ _OPS = {
     "session.relogin": op_session_relogin,
     "desktop.list": op_desktop_list,
     "desktop.power": op_desktop_power,
+    "desktop.connectInfo": op_desktop_connect_info,
+    "desktop.reportConnect": op_desktop_report_connect,
     "keepalive.l1": op_keepalive_l1,
     "keepalive.l2": op_keepalive_l2,
     "logout": op_logout,

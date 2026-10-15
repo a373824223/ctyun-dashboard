@@ -20,12 +20,13 @@
  *
  * 诚实性红线（不可放宽）：
  *   1. 三态必须原样保留 —— 把 ok=null 压成 false 会导致每轮密码重登 → 短信轰炸；
- *   2. 单端点 401 绝不触发重登（判定在侧车 keepalive_probe 内完成）；
+ *   2. L1 探针的单端点 401 不触发重登（判定在侧车 keepalive_probe 内完成）；
  *   3. L1/L2 成功**不等于**云电脑不被关机（HTTP 层没有会话心跳能力），
  *      因此 `metrics.keepaliveClaim` 恒为 'none'，UI 不得显示笼统的"保活中/已保活"。
  */
 
 const { EcloudEngine, EngineState } = require('./ecloud_engine');
+const { connectOnce, connectPersistent, isConnectionBusy } = require('./cmss_connect');
 
 /** 日志来源标识（后端 inferLogPlatform 据此归入 ecloud 平台流） */
 const LOG_SOURCE = 'ECLOUD';
@@ -33,6 +34,15 @@ const LOG_SOURCE = 'ECLOUD';
 const TICK_INTERVAL_MS = 20000;
 /** 桌面列表静默刷新间隔 */
 const DESKTOP_REFRESH_MS = 10 * 60 * 1000;
+/** 真实进入后退出：平台约 24 小时未进入会关机，提前 4 小时重新进入。 */
+const AUTO_ENTER_INTERVAL_MS = 20 * 60 * 60 * 1000;
+const AUTO_ENTER_RETRY_MS = 30 * 60 * 1000;
+function isAutoEnterEnabled(account) {
+  const configured = account.features?.autoEnter;
+  if (configured !== undefined) return configured === true;
+  // 兼容旧账号：原来只提供单机开关，保留已经启用的自动进入任务。
+  return (account.desktops || []).some(d => d.realEnterEnabled === true);
+}
 /** L1/L2 缺省周期（秒）——可由账号/单机字段覆盖 */
 const DEFAULT_L1_INTERVAL_SEC = 300;
 /**
@@ -165,6 +175,8 @@ class EcloudClient {
     this._suspendedNotified = false;
     // 凭证续期时间戳（0 = 尚未建立/恢复会话；建立后由 ensureSession / 各级重登写入）
     this._lastTokenRefreshAt = 0;
+    this._tokenReloginPromise = null;
+    this._tokenRetryNotBefore = 0;
   }
 
   // ---------------------------------------------------------------- 基础设施
@@ -253,7 +265,10 @@ class EcloudClient {
         { username: this.account.user, deviceUid: this.ensureDeviceUid() }, this.sessionId);
       if (r && r.restored) {
         this._sessionReady = true;
-        this._lastTokenRefreshAt = Date.now(); // 恢复即视为新鲜（真实年龄未知，401 路径兜底）
+        // 恢复旧令牌不等于重新签发。用侧车保存的签发时间决定下一次续期。
+        const issuedAt = Number(r.tokenIssuedAt) * 1000;
+        this._lastTokenRefreshAt = Number.isFinite(issuedAt) && issuedAt > 0 && issuedAt <= Date.now()
+          ? issuedAt : Date.now() - ECLOUD_TOKEN_REFRESH_MS;
         this.metrics.sessionSource = 'restored';
         this.metrics.needsInteractiveLogin = false;
         this._log('会话已从本地 token 恢复（免重复登录）', 'info');
@@ -269,6 +284,7 @@ class EcloudClient {
     if (status === 'success') {
       this._sessionReady = true;
       this._lastTokenRefreshAt = Date.now(); // 新 token 签发
+      this._tokenRetryNotBefore = 0;
       this.metrics.sessionSource = 'login';
       this.metrics.needsInteractiveLogin = false;
       this._log('✅ 登录成功，会话已建立（token 已本地保存）', 'success');
@@ -296,9 +312,11 @@ class EcloudClient {
   async loginInteractive(branch, code, opts = {}) {
     await this.startEngine();
     if (!branch) {
-      const r = await this.engine.loginBegin(this.sessionId, this._loginParams());
+      const r = await this.engine.loginBegin(this.sessionId, { ...this._loginParams(), preserveOnInteractive: !!opts.preserveOnInteractive });
       if (r && r.status === 'success') {
         this._sessionReady = true;
+        this._lastTokenRefreshAt = Date.now();
+        this._tokenRetryNotBefore = 0;
         this.metrics.sessionSource = 'login';
         this.metrics.needsInteractiveLogin = false;
         this._log('✅ 面板登录成功', 'success');
@@ -312,6 +330,8 @@ class EcloudClient {
     });
     if (r && r.status === 'success') {
       this._sessionReady = true;
+      this._lastTokenRefreshAt = Date.now();
+      this._tokenRetryNotBefore = 0;
       this.metrics.sessionSource = 'login';
       this.metrics.needsInteractiveLogin = false;
       this._log('✅ 短信验证通过，登录成功', 'success');
@@ -354,11 +374,156 @@ class EcloudClient {
   }
 
   // ---------------------------------------------------------------- 桌面列表
+  _isTokenExpiredError(error) {
+    return /(?:\[401\]|token失效|token已过期|token expired)/i.test(String(error && error.message || error));
+  }
+
+  /** 只有明确收到令牌失效才重登；并发的桌面请求共用同一次重登。 */
+  async _reloginExpiredToken() {
+    if (this._tokenReloginPromise) return this._tokenReloginPromise;
+    if (Date.now() < this._tokenRetryNotBefore) {
+      throw new Error('登录令牌已失效，自动重登处于冷却期，请在面板重新登录');
+    }
+    this._tokenReloginPromise = (async () => {
+      this._log('登录令牌已失效，正在自动重新登录', 'warning');
+      const rr = await this.engine.request('session.relogin',
+        { ...this._loginParams(), quiet: true }, this.sessionId);
+      if (rr && rr.relogged) {
+        this._lastTokenRefreshAt = Date.now();
+        this._tokenRetryNotBefore = 0;
+        this.metrics.needsInteractiveLogin = false;
+        this.metrics.l1.relogins += 1;
+        this._log('自动重新登录成功，继续刚才的操作', 'success');
+        return true;
+      }
+      this._tokenRetryNotBefore = Date.now() + Math.max(60, Number(rr && rr.nextInSec) || 60) * 1000;
+      if (rr && rr.needInteractive) {
+        this.metrics.needsInteractiveLogin = true;
+        throw new Error('登录令牌已失效，需要短信验证，请在面板重新登录');
+      }
+      throw new Error('登录令牌已失效，自动重登未完成，请在面板重新登录');
+    })();
+    try { return await this._tokenReloginPromise; }
+    finally { this._tokenReloginPromise = null; }
+  }
+
+  async _withTokenRecovery(action) {
+    const tokenAtStart = this._lastTokenRefreshAt;
+    try { return await action(); }
+    catch (error) {
+      if (!this._isTokenExpiredError(error)) throw error;
+      if (this._lastTokenRefreshAt <= tokenAtStart) await this._reloginExpiredToken();
+      return action(); // 每个操作最多重试一次，避免 401 循环
+    }
+  }
+
+  async enterAndExitDesktop(instanceId) {
+    await this.ensureSession();
+    const desktop = (this.account.desktops || []).find(d => String(d.instanceId) === String(instanceId));
+    if (!desktop) throw new Error('账号下找不到这台云电脑，请先同步桌面列表');
+    const label = desktop.machineName || desktop.instanceId;
+    this._log(`[${label}] 开始一次真实进入，连接成功后自动退出`, 'info');
+    let info;
+    try {
+      info = await this._withTokenRecovery(() =>
+        this.engine.desktopConnectInfo(this.sessionId, { instanceId }));
+      const result = await connectOnce(info, {
+        onConnected: () => this.engine.desktopReportConnect(this.sessionId, {
+          machineId: info.machineId,
+          machineName: info.machineName,
+          connectId: info.connectId,
+        }),
+      });
+      const currentDesktop = (this.account.desktops || []).find(d => String(d.instanceId) === String(instanceId)) || desktop;
+      currentDesktop.lastRealEnterAt = result.connectedAt;
+      currentDesktop.lastRealExitAt = result.disconnectedAt;
+      this.saveConfig();
+      this._recordDesktopAction(instanceId, '已真实进入并自动退出', 'success');
+      if (!result.reported) this._log(`[${label}] 平台会话登记未确认：${result.reportError || '未知错误'}`, 'warn');
+      this._log(`[${label}] 桌面组件确认连接成功，随后已自动断开（会话登记${result.reported ? '成功' : '未确认'}）`, 'success');
+      return {
+        success: true,
+        message: `已进入 ${label} 并自动退出，云电脑未关机`,
+        connectedAt: result.connectedAt,
+        disconnectedAt: result.disconnectedAt,
+        sessionReported: result.reported,
+        reportError: result.reportError || '',
+      };
+    } catch (e) {
+      this._log(`[${label}] 进入后退出未完成：${e.message}`, 'error');
+      throw e;
+    }
+  }
+
+  getHeldDesktopInstanceId() {
+    const held = this._heldDesktopSession;
+    return held?.handle?.connected ? held.instanceId : '';
+  }
+
+  async enterAndStayDesktop(instanceId) {
+    await this.ensureSession();
+    const desktop = (this.account.desktops || []).find(d => String(d.instanceId) === String(instanceId));
+    if (!desktop) throw new Error('账号下找不到这台云电脑，请先同步桌面列表');
+    if (desktop.originCompanyCode !== 'CMSSZTE') throw new Error('这台云电脑不支持本机组件进入');
+    if (this.getHeldDesktopInstanceId() === String(instanceId)) {
+      return { success: true, connected: true, message: '这台云电脑已经保持连接' };
+    }
+    if (isConnectionBusy()) throw new Error('已有一台云电脑正在连接或保持连接，请先退出当前连接');
+    const label = desktop.computerName || desktop.machineName || desktop.instanceId;
+    const session = { instanceId: String(instanceId), handle: null, active: true };
+    this._heldDesktopSession = session;
+    this._log(`[${label}] 开始手动进入并保持连接`, 'info');
+    try {
+      const info = await this._withTokenRecovery(() =>
+        this.engine.desktopConnectInfo(this.sessionId, { instanceId }));
+      const handle = await connectPersistent(info, {
+        onConnected: () => this.engine.desktopReportConnect(this.sessionId, {
+          machineId: info.machineId,
+          machineName: info.machineName,
+          connectId: info.connectId,
+        }),
+        onClosed: (error) => {
+          session.active = false;
+          if (this._heldDesktopSession === session) this._heldDesktopSession = null;
+          const current = (this.account.desktops || []).find(d => String(d.instanceId) === String(instanceId));
+          if (current && session.handle?.connectedAt) {
+            current.lastRealExitAt = Date.now();
+            this.saveConfig();
+          }
+          this._recordDesktopAction(instanceId, error ? `保持连接中断：${error.message}` : '已退出保持连接', error ? 'warning' : 'idle');
+          this._log(`[${label}] ${error ? `保持连接中断：${error.message}` : '已退出保持连接'}，云电脑未关机`, error ? 'warning' : 'info');
+        },
+      });
+      session.handle = handle;
+      if (!session.active || !handle.connected) throw new Error('桌面组件刚连接后又断开');
+      const current = (this.account.desktops || []).find(d => String(d.instanceId) === String(instanceId)) || desktop;
+      current.lastRealEnterAt = handle.connectedAt;
+      this.saveConfig();
+      this._recordDesktopAction(instanceId, '已真实进入，正在保持连接', 'success');
+      if (!handle.reported) this._log(`[${label}] 平台会话登记未确认：${handle.reportError || '未知错误'}`, 'warning');
+      this._log(`[${label}] 桌面组件确认连接成功，正在保持连接`, 'success');
+      return { success: true, connected: true, message: `已进入 ${label}，保持连接中；云电脑未关机`, connectedAt: handle.connectedAt, sessionReported: handle.reported };
+    } catch (e) {
+      if (this._heldDesktopSession === session) this._heldDesktopSession = null;
+      this._log(`[${label}] 手动保持连接未完成：${e.message}`, 'error');
+      throw e;
+    }
+  }
+
+  async exitHeldDesktop(instanceId) {
+    const session = this._heldDesktopSession;
+    if (!session?.handle?.connected || session.instanceId !== String(instanceId)) {
+      return { success: true, connected: false, message: '这台云电脑当前没有由本面板保持的连接' };
+    }
+    await session.handle.disconnect();
+    return { success: true, connected: false, message: '已退出连接，云电脑未关机' };
+  }
+
   async refreshDesktops() {
     const accName = this.account.name || this.account.user;
     try {
       await this.ensureSession();
-      const r = await this.engine.desktopList(this.sessionId);
+      const r = await this._withTokenRecovery(() => this.engine.desktopList(this.sessionId));
       const list = (r && r.desktops) || [];
 
       // 差异合并：严格保留本机运行时状态。约定 `_` 前缀 = 本系统自用状态
@@ -374,6 +539,9 @@ class EcloudClient {
           if (old.keepaliveInterval !== undefined) d.keepaliveInterval = old.keepaliveInterval;
           if (old.lastKeepAliveAt !== undefined) d.lastKeepAliveAt = old.lastKeepAliveAt;
           if (old.uptime !== undefined) d.uptime = old.uptime;
+          if (old.realEnterEnabled !== undefined) d.realEnterEnabled = old.realEnterEnabled;
+          if (old.lastRealEnterAt !== undefined) d.lastRealEnterAt = old.lastRealEnterAt;
+          if (old.lastRealExitAt !== undefined) d.lastRealExitAt = old.lastRealExitAt;
         } else if (d.keepaliveEnabled === undefined) {
           d.keepaliveEnabled = true;
         }
@@ -541,13 +709,13 @@ class EcloudClient {
     if (!d) throw new Error('未找到该云电脑（请先「同步桌面」拉取列表）');
     if (!d.machineId) throw new Error('该云电脑缺少 machineId，无法下发电源指令（请先「同步桌面」）');
 
-    const r = await this.engine.desktopPower(this.sessionId, {
+    const r = await this._withTokenRecovery(() => this.engine.desktopPower(this.sessionId, {
       instanceId: d.instanceId,
       machineId: d.machineId,
       machineName: d.machineName || '',
       resourcePoolUid: d.resourcePoolUid || '',
       operate,
-    });
+    }));
     const msg = (r && r.message) || `已下发${opCn}指令，平台已受理`;
     this._log(`[${d.machineName || d.instanceId}] ✅ 已下发【${opCn}】指令，平台已受理（operate=${operate}）`, 'success');
     this._recordDesktopAction(d.instanceId, `✅ 已下发${opCn}指令（待平台生效）`, 'ok');
@@ -635,7 +803,8 @@ class EcloudClient {
         // 凭证主动续期（2026-09-27：平台 accessToken 约 30 分钟有效，真机统计 92/111 次 401
         // 间隔精确 30.5 分钟）。提前 ~5 分钟静默刷新，密码登录频率与原先完全相同，
         // 但不让"过期后的第一个调用"再吃 401。失败不阻断，回落为原有的 401 触发重登。
-        if (this._lastTokenRefreshAt && Date.now() - this._lastTokenRefreshAt >= ECLOUD_TOKEN_REFRESH_MS) {
+        if (this._lastTokenRefreshAt && Date.now() - this._lastTokenRefreshAt >= ECLOUD_TOKEN_REFRESH_MS
+            && Date.now() >= this._tokenRetryNotBefore) {
           try {
             const rr = await this.engine.request('session.relogin',
               { ...this._loginParams(), quiet: true }, this.sessionId);
@@ -644,8 +813,10 @@ class EcloudClient {
               this._log('🔁 凭证已按周期静默续期（平台 accessToken 约 30 分钟有效，提前续期避免 401）', 'info');
             } else if (rr && rr.skipped === 'cooldown') {
               // 冷却期内不强行重登（防短信轰炸）；不推进时间戳，下一 tick 再试
+              this._tokenRetryNotBefore = Date.now() + Math.max(60, Number(rr.nextInSec) || 60) * 1000;
             } else if (rr && rr.needInteractive) {
               this.metrics.needsInteractiveLogin = true;
+              this._tokenRetryNotBefore = Date.now() + Math.max(60, Number(rr.nextInSec) || 60) * 1000;
               this._log(`凭证续期需要短信验证（${rr.status}），请在面板完成登录后再恢复自动保活`, 'error');
             }
           } catch (e) {
@@ -722,6 +893,25 @@ class EcloudClient {
             acted = true;
           } catch (e) {
             this._recordDesktopAction(d.instanceId, `L2 异常: ${e.message}`, 'error');
+          }
+        }
+
+        // 真实进入按单机开关执行，每轮最多一台，避免同时抢占用户的桌面会话。
+        // 未成功的任务 30 分钟后重试；只有组件确认连接且断开才更新 20 小时计时。
+        if (isAutoEnterEnabled(this.account) && !isConnectionBusy()) {
+          const due = (this.account.desktops || []).find(d =>
+            d.realEnterEnabled === true
+            && d.originCompanyCode === 'CMSSZTE'
+            && this._effectivePowerState(d).state === 'on'
+            && now - (d.lastRealEnterAt || 0) >= AUTO_ENTER_INTERVAL_MS
+            && now - (d._lastAutoEnterAttemptAt || 0) >= AUTO_ENTER_RETRY_MS);
+          if (due) {
+            due._lastAutoEnterAttemptAt = now;
+            try {
+              await this.enterAndExitDesktop(due.instanceId);
+            } catch (e) {
+              this._log(`[${due.machineName || due.instanceId}] 定时进入后退出失败：${e.message}`, 'warning');
+            }
           }
         }
 
@@ -837,4 +1027,4 @@ class EcloudClient {
   }
 }
 
-module.exports = { EcloudClient, LOG_SOURCE, INTERACTIVE_BRANCHES };
+module.exports = { EcloudClient, LOG_SOURCE, INTERACTIVE_BRANCHES, isAutoEnterEnabled };
