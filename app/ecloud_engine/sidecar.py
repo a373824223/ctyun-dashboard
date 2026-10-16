@@ -535,6 +535,28 @@ def op_desktop_power(params: dict) -> dict:
     }
 
 
+def _record_client_login(s: dict, login_uid: str) -> None:
+    """每次真实进入前刷新平台的本机登录登记；该记录可能先于 token 过期。"""
+    try:
+        s["http"].post(_config.Endpoint.RECORD_DEVICE_INFO, {
+            "clientLoginUid": login_uid,
+        })
+    except Exception as exc:
+        # 平台原始错误可能回显连接票据和桌面口令，不能送进日志或页面。
+        raise RuntimeError(f"登记本机登录信息失败（{type(exc).__name__}）") from None
+
+
+def _safe_connect_report_error(exc: Exception) -> str:
+    """只返回白名单错误码和原因，不透传平台可能含票据的错误正文。"""
+    if isinstance(exc, EcloudError):
+        if "没有找到桌面连接客户端登录的信息" in str(exc.message):
+            return "平台未找到本机登录登记（错误码 500）"
+        code = str(exc.code)
+        if code.isalnum() and len(code) <= 20:
+            return f"平台错误码 {code}"
+    return type(exc).__name__
+
+
 def op_desktop_connect_info(params: dict) -> dict:
     """取官方桌面组件的连接参数；绝不把这些敏感字段返回给浏览器。"""
     _require_ready()
@@ -559,16 +581,9 @@ def op_desktop_connect_info(params: dict) -> dict:
     users = user_body.get("userInfoList") if isinstance(user_body, dict) else []
     user = (users or [{}])[0]
     login_uid = s.setdefault("loginUid", str(uuid.uuid4()))
-    if not s.get("loginRecorded"):
-        # 官方客户端在连接前登记本机登录标识；machineConnect 依赖此记录。
-        try:
-            s["http"].post(_config.Endpoint.RECORD_DEVICE_INFO, {
-                "clientLoginUid": login_uid,
-            })
-        except Exception as exc:
-            # 平台错误中可能带票据和桌面口令，不能原样返回面板。
-            raise RuntimeError(f"登记本机登录信息失败（{type(exc).__name__}）") from None
-        s["loginRecorded"] = True
+    # 不能沿用进程内的 loginRecorded=true：平台记录会过期，次日的连接会报
+    # “没有找到桌面连接客户端登录的信息”，即使账号 token 和桌面组件仍有效。
+    _record_client_login(s, login_uid)
     return {
         "machineId": str(machine.get("machineId") or ""),
         "machineName": str(machine.get("machineName") or ""),
@@ -602,19 +617,31 @@ def op_desktop_report_connect(params: dict) -> dict:
     connect_id = str(params.get("connectId") or "")
     if not machine_id or not connect_id:
         raise ValueError("缺少连接标识")
+    login_uid = s.setdefault("loginUid", str(uuid.uuid4()))
+    payload = {
+        "ticket": ticket,
+        "machineId": machine_id,
+        "machineName": str(params.get("machineName") or ""),
+        "status": "success", "flag": True,
+        "errorCode": "", "errorMsg": "",
+        "clientConnectId": connect_id,
+        "clientLoginUid": login_uid,
+        "sessionId": connect_id,
+    }
     try:
-        body = s["http"].post(_config.Endpoint.SESSION_MACHINE_CONNECT, {
-            "ticket": ticket,
-            "machineId": machine_id,
-            "machineName": str(params.get("machineName") or ""),
-            "status": "success", "flag": True,
-            "errorCode": "", "errorMsg": "",
-            "clientConnectId": connect_id,
-            "clientLoginUid": s.setdefault("loginUid", str(uuid.uuid4())),
-            "sessionId": connect_id,
-        })
+        body = s["http"].post(_config.Endpoint.SESSION_MACHINE_CONNECT, payload)
+    except EcloudError as exc:
+        if "没有找到桌面连接客户端登录的信息" not in str(exc.message):
+            raise RuntimeError(f"平台会话登记失败（{_safe_connect_report_error(exc)}）") from None
+        # 平台偶尔尚未识别刚写入的登录记录：补登记并且只重试一次。
+        _record_client_login(s, login_uid)
+        time.sleep(1)
+        try:
+            body = s["http"].post(_config.Endpoint.SESSION_MACHINE_CONNECT, payload)
+        except Exception as retry_exc:
+            raise RuntimeError(f"平台会话登记失败（{_safe_connect_report_error(retry_exc)}）") from None
     except Exception as exc:
-        raise RuntimeError(f"平台会话登记失败（{type(exc).__name__}）") from None
+        raise RuntimeError(f"平台会话登记失败（{_safe_connect_report_error(exc)}）") from None
     return {"ok": True, "connectId": body.get("connectId") if isinstance(body, dict) else ""}
 
 
